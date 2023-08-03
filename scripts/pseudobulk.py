@@ -1,6 +1,5 @@
-os.chdir('/nethome/kcni/karbabi/r_projects/reverse_signatures/scripts')
-
 import anndata as ad, numpy as np, pandas as pd, scanpy as sc,  os, gc
+os.chdir('/nethome/kcni/karbabi/r_projects/reverse_signatures/scripts')
 from utils import Timer
 
 os.chdir('/nethome/kcni/karbabi/stlab')
@@ -90,7 +89,6 @@ else:
     AD_data.write(AD_data_file)
 
 gc.collect()
-get_available_ram()
 
 ################################################################################
 # Load Parkinson's data (10 PD/LBD individuals and 8 neurotypical controls)
@@ -218,10 +216,8 @@ else:
     print('Preprocessing MDD data...')
     from scipy.io import mmread  # could also use sc.read_10x_mtx()
     MDD_counts = mmread('Maitra/matrix.mtx.gz').T.tocsr().astype(np.int32)
-    MDD_genes = pd.read_table('Maitra/features.tsv.gz', usecols=[0],
-                             index_col=0, header=None, names=[None]).index
-    MDD_cell_types = pd.read_table('Maitra/meta.tsv', skiprows=[1],
-                                   usecols=['Cell', 'Broad'], index_col='Cell')\
+    MDD_genes = pd.read_table('Maitra/features.tsv.gz', usecols=[0], index_col=0, header=None, names=[None]).index
+    MDD_cell_types = pd.read_table('Maitra/meta.tsv', usecols=['Cell','Broad'], index_col='Cell')\
         .assign(broad_cell_type=lambda df: df.Broad
         .replace({'Ast':'Astrocyte',
                   'End':'Endothelial',
@@ -229,20 +225,25 @@ else:
                   'InN':'Inhibitory',
                   'Mic':'Microglia-PVM',
                   'Oli':'Oligodendrocyte',
-                  'OPC':'OPC'})).astype('category') # sort cats with pd.CategoricalDtype(ordered=True)
-    MDD_metadata = pd.read_table('Maitra/meta.tsv', skiprows=[1],
-                                index_col='Cell', low_memory=False)\
-        .loc[pd.read_table('Maitra/', usecols=[0], index_col=0,
-                           header=None, names=[None]).index]\
+                  'OPC':'OPC'})).astype('category')\
+        .query("Broad != 'Mix'")\
+        .astype('category')
+    MDD_metadata = pd.read_table('Maitra/meta.tsv')
+    MDD_metadata = MDD_metadata\
+        .assign(ID_column= MDD_metadata["Cell"].str.split(".", n=1).str[0])\
+        .set_index("Cell")\
         .astype('category')\
-        .astype({'Donor_Age': int, 'Donor_PMI': float})\
-        .join(MDD_cell_types)
-    assert len(MDD_genes) == 41625, len(MDD_genes)
-    assert len(MDD_metadata) == 434354, len(MDD_metadata)
-    assert (MDD_num_typed_cells := MDD_metadata.Cell_Type.notna().sum()) == \
-           387483, MDD_num_typed_cells
+        .query("Broad != 'Mix'")\
+        .combine_first(MDD_cell_types)
+    index_map = {index: i for i, index in enumerate(MDD_metadata.index)}
+    rows_to_keep = [index_map[index] for index in MDD_metadata.index]
+    MDD_counts = MDD_counts[rows_to_keep, :]
+    assert len(MDD_genes) == 36588, len(MDD_genes)
+    assert len(MDD_metadata) == 156911, len(MDD_metadata)
+    assert (MDD_num_typed_cells := MDD_metadata.Cluster.notna().sum()) == \
+           156911, MDD_num_typed_cells
     assert MDD_counts.shape == (len(MDD_metadata), len(MDD_genes)), MDD_counts.shape
-    MDD_data = ad.AnnData(MDD_counts, obs=MDD_metadata, var=MDD.DataFrame(
+    MDD_data = ad.AnnData(MDD_counts, obs=MDD_metadata, var=pd.DataFrame(
         index=MDD_genes), dtype=MDD_counts.dtype)
     # noinspection PyTypeChecker
     MDD_data.write(MDD_data_file)
@@ -264,26 +265,25 @@ AD_data.obs = AD_data.obs\
 # Define data fields we're using
 ################################################################################
 
-data_files = {'AD': AD_data_file, 'PD': PD_data_file, 'SCZ': SCZ_data_file}
-datasets = {'AD': AD_data, 'PD': PD_data, 'SCZ': SCZ_data}
+data_files = {'AD': AD_data_file, 'PD': PD_data_file, 'SCZ': SCZ_data_file, 'MDD': MDD_data_file}
+datasets = {'AD': AD_data, 'PD': PD_data, 'SCZ': SCZ_data, 'MDD': MDD_data}
 original_datasets = datasets  # for reference
 covariate_columns = {
-    'AD': ['Age at death', 'sex', 'APOE4 status', 'Metadata: PMI',
-           'Study: ACT'],  # 'Study: ADRC Clinical Core' is multicollinear
+    'AD': ['Age at death', 'sex', 'APOE4 status', 'Metadata: PMI'], 
     'PD': ['organ__ontology_label', 'sex', 'Donor_Age', 'Donor_PMI'],
-    'SCZ': ['Batch', 'Gender', 'Age', 'PMI']}
-    # 'Cohort' is collinear with Batch; 'HTO' is also collinear with something
+    'SCZ': ['Batch', 'Gender', 'Age', 'PMI'],
+    'MDD': ['Batch', 'Chemistry', 'Condition', 'Sex']
+    }
 cell_type_column = {'AD': 'broad_cell_type', 'PD': 'broad_cell_type',
-                    'SCZ': 'broad_cell_type'}
+                    'SCZ': 'broad_cell_type', 'MDD': 'broad_cell_type'}
 fine_cell_type_column = {'AD': 'Supertype', 'PD': 'Cell_Type',
-                         'SCZ': 'Celltype'}
-ID_column = {'AD': 'Donor ID', 'PD': 'donor_id', 'SCZ': 'unique_donor_ID'}
-phenotype_column = {'AD': 'disease', 'PD': 'disease__ontology_label',
-                    'SCZ': 'Phenotype'}
-control_name = {'AD': 'normal', 'PD': 'normal', 'SCZ': 'CON'}
+                         'SCZ': 'Celltype', 'MDD': 'fine_cell_type'}
+ID_column = {'AD': 'Donor ID', 'PD': 'donor_id', 'SCZ': 'unique_donor_ID', 'MDD': 'ID_column'}
+phenotype_column = {'AD': 'disease', 'PD': 'disease__ontology_label', 'SCZ': 'Phenotype', 'MDD': 'Condition'}
+control_name = {'AD': 'normal', 'PD': 'normal', 'SCZ': 'CON', 'MDD': 'Control'}
 assert (dataset_sizes := {dataset_name: dataset.shape
                           for dataset_name, dataset in datasets.items()}) == \
-       {'AD': (1378211, 36517), 'PD': (434354, 41625), 'SCZ': (468727, 17658)
+       {'AD': (1378211, 36517), 'PD': (434354, 41625), 'SCZ': (468727, 17658), 'MDD': (156911, 36588)
         }, dataset_sizes
 
 # Make sure covariates are the same for all cells of a given person + cell-type
@@ -306,8 +306,10 @@ def print_dataset_sizes(label, datasets):
 # Filter to cells with >= 200 genes detected
 
 for dataset_name, dataset in datasets.items():
-    with Timer(f'[{dataset_name}] Filtering to cells with >= 200 genes'):
-        sc.pp.filter_cells(dataset, min_genes=200)
+    if dataset_name != 'AD_data':
+        with Timer(f'[{dataset_name}] Filtering to cells with >= 200 genes'):
+            sc.pp.filter_cells(dataset, min_genes=200)
+            gc.collect()
 
 print_dataset_sizes('After filtering to cells with >= 200 genes', datasets)
 # {'AD': (1378211, 36517), 'PD': (434354, 41625), 'SCZ': (468727, 17658)}
@@ -315,11 +317,12 @@ print_dataset_sizes('After filtering to cells with >= 200 genes', datasets)
 # Filter to cells with < 5% mitochondrial reads
 
 for dataset_name, dataset in datasets.items():
-    with Timer(f'[{dataset_name}] Filtering to cells <5% mitochondrial reads'):
-        mitochondrial_genes = dataset.var.index.str.startswith('MT-')
-        percent_mito = dataset[:, mitochondrial_genes].X.sum(axis=1).A1 / \
-                       dataset.X.sum(axis=1).A1
-        datasets[dataset_name] = dataset[percent_mito < 0.05]
+    if dataset_name != 'AD_data':
+        with Timer(f'[{dataset_name}] Filtering to cells <5% mitochondrial reads'):
+            mitochondrial_genes = dataset.var.index.str.startswith('MT-')
+            percent_mito = dataset[:, mitochondrial_genes].X.sum(axis=1).A1 / \
+                        dataset.X.sum(axis=1).A1
+            datasets[dataset_name] = dataset[percent_mito < 0.05]
 
 print_dataset_sizes('After filtering to cells with <5% mitochondrial reads',
                     datasets)
@@ -410,6 +413,7 @@ print_dataset_sizes('After pseudobulking', pseudobulks)
 
 
 
+
 def pseudobulk(dataset, ID_column, cell_type_column):
     # Use observed=True to skip groups where any of the columns is NaN
     groupby = [ID_column, cell_type_column]
@@ -425,6 +429,8 @@ def pseudobulk(dataset, ID_column, cell_type_column):
     metadata = grouped.first().loc[pseudobulk.index, grouped.nunique().le(1).all()]
     metadata['num_cells'] = dataset.obs.groupby(groupby).size()
     return pseudobulk, metadata
+
+os.chdir('/nethome/kcni/karbabi/r_projects/reverse_signatures/scripts')
 
 pseudobulk, metadata = pseudobulk(AD_data, ID_column = 'Donor ID', cell_type_column = 'Subclass')
 pseudobulk.to_csv('data/pseudobulks/SEA-AD_pseudobulk_subclass.csv', index=True)
