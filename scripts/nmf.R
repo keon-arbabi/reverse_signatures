@@ -1,13 +1,12 @@
-
 suppressPackageStartupMessages({
   library("reticulate")
   library("anndata")
+  library("Matrix")
   library("RcppML")
   library("singlet") 
 })
 
-setwd('C://Users/keona/OneDrive - University of Toronto/CAMH R/reverse_signatures')
-use_condaenv("revsig", required = TRUE)
+#use_condaenv("revsig", required = TRUE)
 
 sc = import('scanpy')
 source_python("scripts/utils.py")
@@ -34,28 +33,22 @@ adata = lapply(adata, function(x) {
   return(x)
 })
 # convert counts to CPMs (no log transformation)
-adata = lapply(adata, function(x) {
-  x$X = x$X / Matrix::rowSums(x$X) * 1e6
-  return(x)
+# convert to sparse matrix 
+sdata = lapply(adata, function(x) {
+  m = x$X
+  m = m / rowSums(m) * 1e6
+  m = Matrix(t(m), sparse = TRUE)
+  return(m)
 })
+# check if sparse 
+class(sdata[[1]])[[1]] != "matrix"
 
 kmin = 2
 kmax = 200
-MSE_ls = lapply(adata, function(x) {
-  cross_validate_nmf(t(x$X),
-                     ranks = c(kmin, kmax +1),
+MSE_ls = lapply(sdata, function(x) {
+  cross_validate_nmf(x,
+                     ranks = c(kmin, kmax),
                      maxit = 1000)
-  #run_nmf(t(x$X), rank=5, tol=1e-5, maxit = Machine$integer.max
+  #run_nmf(t(x$X), rank=5, tol=1e-5, maxit = 1000)
 
 })
-
-
-
-
-
-
-
-
-
-
-
