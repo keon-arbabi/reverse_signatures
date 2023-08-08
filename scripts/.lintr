@@ -8,6 +8,8 @@ linters: linters_with_defaults(
   closed_curly_linter = NULL,
   commas_linter = NULL,
   commented_code_linter = NULL,
+  quotes_linter = NULL,
+  single_quotes_linter = NULL,
   cyclocomp_linter = NULL,
   duplicate_argument_linter = NULL,
   equals_na_linter = NULL,

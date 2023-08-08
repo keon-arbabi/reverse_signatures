@@ -5,8 +5,7 @@ suppressPackageStartupMessages({
   library("RcppML")
   library("singlet") 
 })
-
-#use_condaenv("revsig", required = TRUE)
+setwd('/home/s/shreejoy/karbabi/scratch/projects/reverse_signatures/')
 
 sc = import('scanpy')
 source_python("scripts/utils.py")
