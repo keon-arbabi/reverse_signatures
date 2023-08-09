@@ -6,6 +6,7 @@ import anndata as ad, gc, matplotlib.pyplot as plt, numpy as np, os, sys, \
 from rpy2.robjects import r
 from scipy.sparse import csr_matrix 
 from scipy.stats import sem
+from matplotlib import gridspec
 
 sys.path.append('projects/reverse_signatures/scripts')
 
@@ -14,17 +15,21 @@ from utils import array_to_rmatrix, highly_variable_genes, rdf_to_df, rmatrix_to
 
 r.library('RcppML')
 
-os.chdir('/projects/reverse_signatures')
+os.chdir('projects/reverse_signatures')
 
 # # load specific cell type and study
-# cell_type = 'Excitatory'
-# study_name = 'SEAAD'
+cell_type = 'Inhibitory'
+study_name = 'SEAAD'
 
 broad_cell_types = 'Excitatory','Inhibitory','Oligodendrocyte','Astrocyte','Microglia-PVM','OPC','Endothelial'
 study_names = 'SEAAD','SZBDMulticohort'
 
 for study_name in study_names:
-    for cell_type in broad_cell_types:
+    fig, axes = plt.subplots(3, 3, figsize=(15, 15)) 
+    [ax.axis('off') for ax in axes.flatten()]
+
+    for i, cell_type in enumerate(broad_cell_types):
+
         with Timer(f'[{study_name} {cell_type}] Loading'):
             adata = sc.read(f'data/pseudobulks/{study_name}-pseudobulk.h5ad')
             adata.obs = adata.obs.assign(study_name=study_name)
@@ -66,7 +71,7 @@ for study_name in study_names:
             .squeeze()\
             .rename('MSE')
 
-        # Choose the smallest k that has a mean MSE (across the three folds) within 1
+        # choose the smallest k that has a mean MSE (across the three folds) within 1
         # standard error of the k with the lowest mean MSE (similar to glmnet's
         # lambda.1se), where the SE is taken across the three folds at the best k
         # - Motivation for the 1 SE rule: stats.stackexchange.com/a/138573
@@ -81,26 +86,29 @@ for study_name in study_names:
         x = mean_MSE.index
         y = mean_MSE
         yerr = MSE.groupby('k').sem()
-        plt.plot(x, y, c='darkgray', zorder=-1)
-        plt.fill_between(x, y - yerr, y + yerr, color='darkgray', alpha=0.5, zorder=-1)
-        plt.xlabel('$k$')
-        plt.ylabel('Mean squared error')
-        plt.scatter(k_best, mean_MSE[k_best], c='b', s=6)
-        plt.scatter(k_1se, mean_MSE[k_1se], c='r', s=6)
-        plt.xticks(range(kmin, kmax + 1))
-        plt.xlim(kmin, kmax)
-        plt.gca().yaxis.set_major_formatter(
-            plt.matplotlib.ticker.StrMethodFormatter('{x:,.0f}'))
-        sns.despine()
 
-        # save 
+        ax = axes[i // 3, i % 3]
+        x = mean_MSE.index
+        y = mean_MSE
+        yerr = MSE.groupby('k').sem()
+        ax.plot(x, y, c='darkgray', zorder=-1)
+        ax.fill_between(x, y - yerr, y + yerr, color='darkgray', alpha=0.5, zorder=-1)
+        ax.scatter(k_best, mean_MSE[k_best], c='b', s=30)
+        ax.scatter(k_1se, mean_MSE[k_1se], c='r', s=30)
+        ax.set_xlabel('$k$')
+        ax.set_ylabel('Mean squared error')
+        ax.set_xticks(range(kmin, kmax + 1))
+        ax.set_xlim(kmin, kmax)
+        ax.yaxis.set_major_formatter(plt.matplotlib.ticker.StrMethodFormatter('{x:,.0f}'))
+        ax.axis('on')
+        ax.set_title(f'{study_name} - {cell_type}')
+
+        # save MSE results 
         os.makedirs('results/MSE', exist_ok=True)
-        savefig(f'results/MSE/{study_name}-{cell_type}_MSE_plot.pdf')
         MSE.to_csv(f'results/MSE/{study_name}-{cell_type}_MSE.tsv', sep='\t')
 
         # re-run NMF at k_1se, without cross-validation
-        NMF_results = r.nmf(log_CPMs_R, k=k_1se, seed=0, tol=1e-5, 
-                            maxit=np.iinfo('int32').max, L1=r.c(0.01, 0.01))
+        NMF_results = r.nmf(log_CPMs_R, k=k_1se, seed=0, tol=1e-5, maxit=np.iinfo('int32').max, L1=r.c(0.01, 0.01))
 
         # get W and H matrices
         W = rmatrix_to_df(NMF_results.slots['w'])\
@@ -111,7 +119,38 @@ for study_name in study_names:
             .set_axis(samp_names)\
             .rename(columns=lambda col: col.replace('nmf', 'Metagene '))
 
-        # save W and H matrices and MSE
+        # save W and H matrices, and MSE
         os.makedirs('results/NMF', exist_ok=True)
         W.to_csv(f'results/NMF/{study_name}-{cell_type}_W.tsv', sep='\t')
         H.to_csv(f'results/NMF/{study_name}-{cell_type}_H.tsv', sep='\t')
+
+        # consensus matrix calculation
+        # re-run NMF multiple times and calculate the consensus matrix
+
+        n_runs = 100
+        consensus_matrix = np.zeros((samp_names.size, samp_names.size))
+
+        for run in range(n_runs):
+            NMF_run = r.nmf(log_CPMs_R, k=k_1se, seed=run, tol=1e-5, maxit=np.iinfo('int32').max, L1=r.c(0.01, 0.01))
+            H_run = rmatrix_to_df(NMF_run.slots['h']).T.set_axis(samp_names)
+
+            # Cluster membership based on max row of each column of H
+            cluster_membership = np.argmax(H_run.values, axis=1)
+
+            # Create connectivity matrix using broadcasting
+            connectivity_matrix = (cluster_membership[:, None] == cluster_membership[None, :]).astype(int)
+
+            consensus_matrix += connectivity_matrix
+
+        consensus_matrix /= n_runs
+
+        # heatmap with clustering
+        sns.clustermap(consensus_matrix, method='average', cmap="YlGnBu")
+        plt.title(f'Consensus Matrix {study_name}-{cell_type}, nruns= {n_runs}')
+        # save
+        os.makedirs('results/consensus', exist_ok=True)
+        savefig(f'results/consensus/{study_name}-{cell_type}_consensus_heatmap.pdf')
+
+    # MSE plots
+    plt.tight_layout()
+    plt.savefig(f'results/MSE/{study_name}_grid_plot.pdf')
