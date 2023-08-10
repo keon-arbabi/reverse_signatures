@@ -1,31 +1,24 @@
-# export MPLCONFIGDIR=$SCRATCH
-# export NUMBA_CACHE_DIR=$SCRATCH
-
 import anndata as ad, gc, matplotlib.pyplot as plt, numpy as np, os, sys, \
     pandas as pd, scanpy as sc, seaborn as sns, warnings
 from rpy2.robjects import r
 from scipy.sparse import csr_matrix 
 from scipy.stats import sem
-from matplotlib import gridspec
-
 sys.path.append('projects/reverse_signatures/scripts')
-
 from utils import array_to_rmatrix, highly_variable_genes, rdf_to_df, rmatrix_to_df, \
       savefig, scientific_notation, Timer
-
 r.library('RcppML')
-
 os.chdir('projects/reverse_signatures')
 
-# # load specific cell type and study
-cell_type = 'Inhibitory'
-study_name = 'SEAAD'
-
+# for each cell broad cell type and study 
 broad_cell_types = 'Excitatory','Inhibitory','Oligodendrocyte','Astrocyte','Microglia-PVM','OPC','Endothelial'
-study_names = 'SEAAD','SZBDMulticohort'
+study_names = 'SEAAD','SZBDMulticohort','ROSMAP'
+
+# temp 
+cell_type = 'Inhibitory'
+study_name = 'ROSMAP'
 
 for study_name in study_names:
-    fig, axes = plt.subplots(3, 3, figsize=(15, 15)) 
+    fig, axes = plt.subplots(3, 3, figsize=(15, 15))
     [ax.axis('off') for ax in axes.flatten()]
 
     for i, cell_type in enumerate(broad_cell_types):
@@ -52,7 +45,7 @@ for study_name in study_names:
         gene_names = adata.var_names
         samp_names = adata.obs_names
 
-        # Run NMF with RcppML, selecting k via 3-fold cross-validation (3 is default):
+        # run NMF with RcppML, selecting k via 3-fold cross-validation (3 is default):
         # - biorxiv.org/content/10.1101/2021.09.01.458620v1.full
         # - github.com/zdebruine/RcppML/blob/main/R/nmf.R
         # - github.com/zdebruine/RcppML/blob/main/R/crossValidate.R
@@ -62,14 +55,12 @@ for study_name in study_names:
 
         kmin, kmax = 1, 10 # IMPORTANT: INCREASE KMAX IF BEST MSE IS CLOSE TO KMAX!!!
         r.options(**{'RcppML.verbose': True})
-        MSE = r.crossValidate(log_CPMs_R, k=r.c(*range(kmin, kmax + 1)), seed=0, reps=3,
-                            tol=1e-5, maxit=np.iinfo('int32').max, 
-                            L1=r.c(0.01, 0.01))
+        MSE = r.crossValidate(log_CPMs_R, k=r.c(*range(kmin, kmax + 1)), seed=0, reps=3, L1=r.c(0.01, 0.01))
         MSE = rdf_to_df(MSE)\
             .astype({'k': int, 'rep': int})\
-            .set_index(['k', 'rep'])\
-            .squeeze()\
-            .rename('MSE')
+                .set_index(['k', 'rep'])\
+                    .squeeze()\
+                        .rename('MSE')
 
         # choose the smallest k that has a mean MSE (across the three folds) within 1
         # standard error of the k with the lowest mean MSE (similar to glmnet's
@@ -113,20 +104,32 @@ for study_name in study_names:
         # get W and H matrices
         W = rmatrix_to_df(NMF_results.slots['w'])\
             .set_axis(gene_names)\
-            .rename(columns=lambda col: col.replace('nmf', 'Metagene '))
+                .rename(columns=lambda col: col.replace('nmf', 'Metagene '))
         H = rmatrix_to_df(NMF_results.slots['h'])\
             .T\
-            .set_axis(samp_names)\
-            .rename(columns=lambda col: col.replace('nmf', 'Metagene '))
+                .set_axis(samp_names)\
+                    .rename(columns=lambda col: col.replace('nmf', 'Metagene '))
+        
+        [gene_names[i] for i in np.argsort(W[:, 5])[-10:]]
+
+        # W.sort_values(by="Metagene 5", ascending=False).index[:20]
 
         # save W and H matrices, and MSE
         os.makedirs('results/NMF', exist_ok=True)
         W.to_csv(f'results/NMF/{study_name}-{cell_type}_W.tsv', sep='\t')
         H.to_csv(f'results/NMF/{study_name}-{cell_type}_H.tsv', sep='\t')
 
-        # consensus matrix calculation
-        # re-run NMF multiple times and calculate the consensus matrix
+        # heatmap for basis vectors W (metagenes)
+        cluster_grid = sns.clustermap(W, method='average', cmap='viridis', standard_scale=1, yticklabels=False, figsize=(7, 10))
+        plt.suptitle(f'Basis Vectors W (Metagenes), {study_name}-{cell_type}', y=1.02)
+        cluster_grid.ax_heatmap.set_ylabel('Genes')
+        cluster_grid.cax.yaxis.set_label_position('left')
+        cluster_grid.cax.set_ylabel('Weight', rotation=90, labelpad=10, verticalalignment='center')
+        # save
+        os.makedirs('results/basis', exist_ok=True)
+        savefig(f'results/basis/{study_name}-{cell_type}_basis_vectors_heatmap.png')
 
+        # heatmap for consensus matrix 
         n_runs = 100
         consensus_matrix = np.zeros((samp_names.size, samp_names.size))
 
@@ -139,18 +142,16 @@ for study_name in study_names:
 
             # Create connectivity matrix using broadcasting
             connectivity_matrix = (cluster_membership[:, None] == cluster_membership[None, :]).astype(int)
-
             consensus_matrix += connectivity_matrix
 
         consensus_matrix /= n_runs
 
-        # heatmap with clustering
         sns.clustermap(consensus_matrix, method='average', cmap="YlGnBu")
-        plt.title(f'Consensus Matrix {study_name}-{cell_type}, nruns= {n_runs}')
+        plt.title(f'Consensus Matrix {study_name}-{cell_type}, k={k_1se} nruns={n_runs}')
         # save
         os.makedirs('results/consensus', exist_ok=True)
-        savefig(f'results/consensus/{study_name}-{cell_type}_consensus_heatmap.pdf')
+        plt.savefig(f'results/consensus/{study_name}-{cell_type}_consensus_heatmap.png')
 
     # MSE plots
     plt.tight_layout()
-    plt.savefig(f'results/MSE/{study_name}_grid_plot.pdf')
+    plt.savefig(f'results/MSE/{study_name}_grid_plot.png')

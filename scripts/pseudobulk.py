@@ -394,44 +394,37 @@ for dataset_name, dataset in datasets.items():
 print_dataset_sizes('After pseudobulking', pseudobulks)
 # {'AD': (709, 36517), 'PD': (144, 41625), 'SCZ': (1052, 17658)}
 
+# change p400 pseudobulk tsv into .h5ad for consistency 
+df = pd.read_csv('/home/s/shreejoy/karbabi/projects/reverse_signatures/data/pseudobulks/p400_pseudobulk.tsv', sep='\t')
+adata = ad.AnnData(X=df.drop(columns=['cell_type', 'ID', 'num_cells']).values,
+                   obs=df[['cell_type', 'ID', 'num_cells']])
+adata.var_names = df.columns[3:]
+adata.write('/home/s/shreejoy/karbabi/projects/reverse_signatures/data/pseudobulks/ROSMAP-pseudobulk.h5ad')
+
+# def pseudobulk(dataset, ID_column, cell_type_column):
+#     # Use observed=True to skip groups where any of the columns is NaN
+#     groupby = [ID_column, cell_type_column]
+#     grouped = dataset.obs.groupby(groupby, observed=True)
+#     # Fill with 0s to avoid auto-conversion to float when filling with NaNs
+#     pseudobulk = pd.DataFrame(
+#         0, index=pd.MultiIndex.from_frame(
+#             grouped.size().rename('num_cells').reset_index()),
+#         columns=dataset.var_names, dtype=dataset.X.dtype)
+#     for row_index, group_indices in enumerate(grouped.indices.values()):
+#         group_counts = dataset[group_indices].X
+#         pseudobulk.values[row_index] = group_counts.sum(axis=0).A1
+#     metadata = grouped.first().loc[pseudobulk.index, grouped.nunique().le(1).all()]
+#     metadata['num_cells'] = dataset.obs.groupby(groupby).size()
+#     return pseudobulk, metadata
+
+# os.chdir('/nethome/kcni/karbabi/r_projects/reverse_signatures/scripts')
+
+# pseudobulk, metadata = pseudobulk(AD_data, ID_column = 'Donor ID', cell_type_column = 'Subclass')
+# pseudobulk.to_csv('data/pseudobulks/SEA-AD_pseudobulk_subclass.csv', index=True)
+# metadata.to_csv('data/pseudobulks/SEA-AD_pseudobulk_subclass_meta.csv', index=True) 
 
 
 
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-def pseudobulk(dataset, ID_column, cell_type_column):
-    # Use observed=True to skip groups where any of the columns is NaN
-    groupby = [ID_column, cell_type_column]
-    grouped = dataset.obs.groupby(groupby, observed=True)
-    # Fill with 0s to avoid auto-conversion to float when filling with NaNs
-    pseudobulk = pd.DataFrame(
-        0, index=pd.MultiIndex.from_frame(
-            grouped.size().rename('num_cells').reset_index()),
-        columns=dataset.var_names, dtype=dataset.X.dtype)
-    for row_index, group_indices in enumerate(grouped.indices.values()):
-        group_counts = dataset[group_indices].X
-        pseudobulk.values[row_index] = group_counts.sum(axis=0).A1
-    metadata = grouped.first().loc[pseudobulk.index, grouped.nunique().le(1).all()]
-    metadata['num_cells'] = dataset.obs.groupby(groupby).size()
-    return pseudobulk, metadata
-
-os.chdir('/nethome/kcni/karbabi/r_projects/reverse_signatures/scripts')
-
-pseudobulk, metadata = pseudobulk(AD_data, ID_column = 'Donor ID', cell_type_column = 'Subclass')
-pseudobulk.to_csv('data/pseudobulks/SEA-AD_pseudobulk_subclass.csv', index=True)
-metadata.to_csv('data/pseudobulks/SEA-AD_pseudobulk_subclass_meta.csv', index=True) 
