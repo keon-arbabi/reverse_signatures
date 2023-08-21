@@ -394,13 +394,6 @@ for dataset_name, dataset in datasets.items():
 print_dataset_sizes('After pseudobulking', pseudobulks)
 # {'AD': (709, 36517), 'PD': (144, 41625), 'SCZ': (1052, 17658)}
 
-# change p400 pseudobulk tsv into .h5ad for consistency 
-df = pd.read_csv('/home/s/shreejoy/karbabi/projects/reverse_signatures/data/pseudobulks/p400_pseudobulk.tsv', sep='\t')
-adata = ad.AnnData(X=df.drop(columns=['cell_type', 'ID', 'num_cells']).values,
-                   obs=df[['cell_type', 'ID', 'num_cells']])
-adata.var_names = df.columns[3:]
-adata.write('/home/s/shreejoy/karbabi/projects/reverse_signatures/data/pseudobulks/ROSMAP-pseudobulk.h5ad')
-
 # def pseudobulk(dataset, ID_column, cell_type_column):
 #     # Use observed=True to skip groups where any of the columns is NaN
 #     groupby = [ID_column, cell_type_column]
@@ -423,8 +416,24 @@ adata.write('/home/s/shreejoy/karbabi/projects/reverse_signatures/data/pseudobul
 # pseudobulk.to_csv('data/pseudobulks/SEA-AD_pseudobulk_subclass.csv', index=True)
 # metadata.to_csv('data/pseudobulks/SEA-AD_pseudobulk_subclass_meta.csv', index=True) 
 
+################################################################################
+# Save preprocessed p400 pseudobulks as .h5ad for consistency 
+################################################################################
 
-
-
-
-
+meta = pd.read_csv('/external/rprshnas01/external_data/rosmap/phenotype/phenotypes_april_21_2023/dataset_978_basic_04-21-2023.csv')\
+    .drop_duplicates(subset='projid')
+df = pd.read_csv('/nethome/kcni/karbabi/stlab/rosmap_p400/p400_pseudobulk.tsv', sep='\t')\
+    .assign(broad_cell_type=lambda df: df.cell_type
+    .replace({'Astro':'Astrocyte',
+            'Endo':'Endothelial',
+            'Glut':'Excitatory',
+            'GABA':'Inhibitory',
+            'Micro':'Microglia-PVM',
+            'Oligo':'Oligodendrocyte',
+            'OPC':'OPC'}))\
+    .astype('category')\
+    .merge(meta, left_on='ID', right_on='projid', how='left')
+adata = ad.AnnData(X=df.drop(columns=['cell_type', 'broad_cell_type', 'ID', 'num_cells']).values,
+                   obs=df[['cell_type', 'broad_cell_type', 'ID', 'num_cells'] + meta.columns.tolist()])
+adata.var['genes'] = df.columns[4:]
+adata.write('/nethome/kcni/karbabi/r_projects/reverse_signatures/data/ROSMAP-pseudobulk.h5ad')
