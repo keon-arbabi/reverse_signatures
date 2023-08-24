@@ -26,11 +26,13 @@ for region in SEAAD_regions:
     else:
         print(f'[{region}] Preprocessing AD data...')
         from scipy.sparse import vstack
-        AD_cell_types = pd.Index(['Astrocyte', 'Chandelier', 'Endothelial', 'L23_IT', 'L4_IT',
-                                'L56_NP', 'L5_ET', 'L5_IT', 'L6_CT', 'L6_IT',
-                                'L6_IT_Car3', 'L6b', 'Lamp5', 'Lamp5_Lhx6',
-                                'Microglia-PVM', 'OPC', 'Oligodendrocyte', 'Pax6', 'Pvalb',
-                                'Sncg', 'Sst', 'Sst_Chodl', 'VLMC', 'Vip'])
+        # AD_cell_types = pd.Index(['Astrocyte', 'Chandelier', 'Endothelial', 'L23_IT', 'L4_IT',
+        #                         'L56_NP', 'L5_ET', 'L5_IT', 'L6_CT', 'L6_IT',
+        #                         'L6_IT_Car3', 'L6b', 'Lamp5', 'Lamp5_Lhx6',
+        #                         'Microglia-PVM', 'OPC', 'Oligodendrocyte', 'Pax6', 'Pvalb',
+        #                         'Sncg', 'Sst', 'Sst_Chodl', 'VLMC', 'Vip'])
+        
+        AD_cell_types = pd.Index(['Sst_Chodl', 'Endothelial'])
         AD_data_per_cell_type = {}
         for cell_type in AD_cell_types:
             print(f'[{region}] Loading {cell_type}...')
@@ -54,8 +56,7 @@ for region in SEAAD_regions:
             del AD_data_per_cell_type[cell_type].obsm
             del AD_data_per_cell_type[cell_type].obsp
             gc.collect()
-        # Alternative to "ad.concat(AD_data_per_cell_type.values(), merge='same')";
-        # I suspect my version is more memory-efficient, but not sure
+            
         print(f'[{region}] Merging...')
         X = vstack([AD_data_per_cell_type[cell_type].X
                     for cell_type in AD_cell_types])
@@ -65,38 +66,74 @@ for region in SEAAD_regions:
         assert all(var.equals(AD_data_per_cell_type[cell_type].var)
                 for cell_type in AD_cell_types[1:])
         AD_data = ad.AnnData(X=X, obs=obs, var=var, dtype=X.dtype)
-        # Join with external metadata file; handle two columns with mixed numbers
-        # and strings ("Age of Death" and "Fresh Brain Weight"); add broad cell type
-        print('[{region}] Joining with external metadata...')
-        AD_metadata = pd.read_excel('single-cell/SEA-AD/sea-ad_cohort_donor_metadata.xlsx')
+        
+        print(f'[{region}] Joining with external metadata...')
+        AD_metadata = pd.read_excel('single-cell/SEAAD/sea-ad_cohort_donor_metadata.xlsx')\
+            # avoid duplicates
+            .drop(['CERAD score','LATE','APOE4 Status','Cognitive Status',
+                   'Overall AD neuropathological Change','Highest Lewy Body Disease',
+                   'Thal','Braak'], axis=1)
         AD_data.obs = AD_data.obs\
+            .drop(['PMI', 'Years of education', 'sex'], axis=1)\
+            .loc[:, lambda df: ~df.apply(lambda col: col.isin(['checked', 'unchecked'])).all()]\
             .assign(broad_cell_type=lambda df: np.where(
                 df.Class == 'Non-neuronal and Non-neural', df.Subclass, np.where(
                 df.Class == 'Neuronal: Glutamatergic', 'Excitatory', np.where(
                 df.Class == 'Neuronal: GABAergic', 'Inhibitory', np.nan))))\
             .reset_index()\
-            .merge(AD_metadata.rename(columns=lambda col: f'Metadata: {col}'),
-                left_on='Donor ID', right_on='Metadata: Donor ID', how='left')\
+            .merge(AD_metadata, left_on='donor_id', right_on='Donor ID', how='left')\
             .set_index('exp_component_name')\
-            .drop('Metadata: Donor ID', axis=1)\
-            .assign(**{'Metadata: Age at Death': lambda df:
-                        df['Metadata: Age at Death']
-                        .replace({'90+': 90})
-                        .astype('Int64'),
-                    'Metadata: Fresh Brain Weight': lambda df:
-                        df['Metadata: Fresh Brain Weight']
+            .drop('Donor ID', axis=1)\
+            .apply(lambda col: col.replace({' ': pd.NA, 'NA': pd.NA, '<NA>': pd.NA, 'nan': pd.NA}))\
+            .assign(**{
+                    'cognitive_status': lambda df: df['Cognitive status'].astype(str)
+                        .map({'Reference': 0, 'No dementia': 1, 'Dementia': 2})
+                        .astype('int32'),
+                    'adnc': lambda df: df['ADNC'].astype(str)\
+                        .map({'Reference': 0, 'Not AD': 1, 'Low': 2, 'Intermediate': 3, 'High': 4})
+                        .astype('Int32'),
+                    'braak_stage': lambda df: df['Braak stage'].astype(str)
+                        .map({'Reference': 0, 'Braak 0': 1, 'Braak II': 2, 'Braak III': 3, 
+                              'Braak IV': 4, 'Braak V': 5, 'Braak VI': 6})
+                        .astype('Int32'),
+                    'thal_phase': lambda df: df['Thal phase'].astype(str)
+                        .map({'Reference': 0, 'Thal 0': 1, 'Thal 1': 2, 'Thal 2': 3, 'Thal 3': 4, 
+                              'Thal 4': 5, 'Thal 5': 6})
+                        .astype('Int32'),
+                    'cerad_score': lambda df: df['CERAD score']
+                        .map({'Reference': 0, 'Absent': 1, 'Sparse': 2, 'Moderate': 3, 'Frequent': 4})
+                        .astype('Int32'),
+                    'late_nc_stage': lambda df: df['LATE-NC stage'].astype(str)
+                        .map({'Staging Precluded by FTLD with TDP43 or ALS/MND or TDP-43 pathology is unclassifiable': 0,
+                              'Reference': 0, 'Not Identified': 1,'LATE Stage 1': 2, 'LATE Stage 2': 3, 'LATE Stage 3': 4})
+                        .astype('Int32'),   
+                    'PMI': lambda df: df['PMI'].fillna(df['PMI'].median())
+                        .astype(float),
+                    'Fresh Brain Weight': lambda df: df['Fresh Brain Weight']
                         .replace({'Unavailable': pd.NA})
                         .astype('Int64'),
-                        'APOE4 status': lambda df: df['APOE4 status'].eq('Y'),
-                    'Metadata: PMI': lambda df: df['Metadata: PMI'].fillna(
-                        df['Metadata: PMI'].median()),
-                    'Study: ACT': lambda df:
-                        df['Metadata: Primary Study Name'].eq('ACT'),
-                    'Study: ADRC Clinical Core': lambda df:
-                        df['Metadata: Primary Study Name'].eq('ADRC Clinical Core')})
+                    'APOE4 status': lambda df: df['APOE4 status'].eq('Y'),
+                    'Neurotypical reference': lambda df: df['Neurotypical reference'].eq('True'),
+                    'ACT': lambda df: df['Primary Study Name'].eq('ACT'),
+                    'ADRC Clinical Core': lambda df: df['Primary Study Name'].eq('ADRC Clinical Core')})\
+            .assign(**{key: lambda df, key=key: df[key].replace({'90+': 90})
+                        .astype('Int64')
+                        for key in ('Age at Death','Age of onset cognitive symptoms','Age of Dementia diagnosis')})\
+            .astype({'Subclass': 'category', 'Supertype': 'category', 'Cognitive status': 'category',
+                     'ADNC': 'category', 'Braak stage': 'category', 'Thal phase': 'category',
+                     'CERAD score': 'category', 'Lewy body disease pathology': 'category', 
+                     'LATE-NC stage': 'category', 'Microinfarct pathology': 'category', 'Specimen ID': 'category',
+                     'Number of UMIs': 'Int64', 'Genes detected': 'Int64', 'Fraction mitochrondrial UMIs': float,
+                     'cell_type': 'category', 'assay': 'category', 'disease': 'category', 'Sex': 'category',
+                     'tissue': 'category', 'self_reported_ethnicity': 'category', 'broad_cell_type': 'category',
+                     'Years of education': 'Int32', 'Last CASI Score': 'Int32', 
+                     })
         print(f'[{region}] Saving...')
         # noinspection PyTypeChecker
         AD_data.write(SEAAD_data_file)
+        
+                            'Age at Death': lambda df: df['Age at Death'].replace({'90+': 90})
+                        .astype('Int64'),
 
 ################################################################################
 # Load Parkinson's data (10 PD/LBD individuals and 8 neurotypical controls)
@@ -257,7 +294,7 @@ else:
 ################################################################################
 
 data_files = {'AD': AD_data_file, 'PD': PD_data_file, 'SCZ': SCZ_data_file, 'MDD': MDD_data_file}
-datasets = {'AD': AD_data, 'PD': PD_data, 'SCZ': SCZ_data, 'MDD': MDD_data}
+datasets = {'AD': SEAAD_data, 'PD': PD_data, 'SCZ': SCZ_data, 'MDD': MDD_data}
 covariate_columns = {
     'AD': ['Age at death', 'sex', 'APOE4 status', 'Metadata: PMI'], 
     'PD': ['organ__ontology_label', 'sex', 'Donor_Age', 'Donor_PMI'],
