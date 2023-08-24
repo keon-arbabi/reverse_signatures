@@ -1,8 +1,7 @@
-import anndata as ad, numpy as np, pandas as pd, scanpy as sc,  os, gc
-os.chdir('/nethome/kcni/karbabi/r_projects/reverse_signatures/scripts')
+import anndata as ad, numpy as np, pandas as pd, scanpy as sc, sys, os, gc
+sys.path.append(os.path.expanduser('~wainberg'))
 from utils import Timer
-
-os.chdir('/nethome/kcni/karbabi/stlab')
+os.chdir('/home/s/shreejoy/karbabi/projects/reverse_signatures/data')
 
 # Anndata format:
 # anndata.readthedocs.io/en/stable/generated/anndata.AnnData.html
@@ -11,84 +10,93 @@ os.chdir('/nethome/kcni/karbabi/stlab')
 
 ################################################################################
 # Load Alzheimer's data
-# Data: portal.brain-map.org/explore/seattle-alzheimers-disease
-# Metadata columns: brainmapportal-live-4cc80a57cd6e400d854-f7fdcae.divio-media.
-#                   net/filer_public/b0/a8/b0a81899-7241-4814-8c1f-4a324db51b0b/
-#                   sea-ad_donorindex_dataelementbriefdescriptions.pdf
+# Documentation: https://portal.brain-map.org/explore/seattle-alzheimers-disease/seattle-alzheimers-disease-brain-cell-atlas-download
+# Data: https://cellxgene.cziscience.com/collections/1ca90a2d-2943-483d-b678-b809bf464c30
+# Metadata columns: brainmapportal-live-4cc80a57cd6e400d854-f7fdcae.divio-media.net/filer_public/b0/a8/b0a81899-7241-4814-8c1f-4a324db51b0b/sea-ad_donorindex_dataelementbriefdescriptions.pdf
 ################################################################################
 
-AD_data_file = 'SEA-AD/SEA-AD.h5ad'
-if os.path.exists(AD_data_file):
-    with Timer('Loading AD data'):
-        AD_data = sc.read(AD_data_file)
-else:
-    print('Preprocessing AD data...')
-    from scipy.sparse import vstack
-    AD_cell_types = pd.Index(['Astro', 'Chandelier', 'Endo', 'L23_IT', 'L4_IT',
-                              'L56_NP', 'L5_ET', 'L5_IT', 'L6_CT', 'L6_IT',
-                              'L6_IT_Car3', 'L6b', 'Lamp5', 'Lamp5_Lhx6',
-                              'Micro-PVM', 'OPC', 'Oligo', 'Pax6', 'Pvalb',
-                              'Sncg', 'Sst', 'Sst_Chodl', 'VLMC', 'Vip'])
-    AD_data_per_cell_type = {}
-    for cell_type in AD_cell_types:
-        print(f'Loading {cell_type}...')
-        AD_data_per_cell_type[cell_type] = sc.read(f'SEA-AD/{cell_type}.h5ad')
-        # raw counts
-        counts = AD_data_per_cell_type[cell_type].raw.X
-        del AD_data_per_cell_type[cell_type].raw
-        # Convert to int32, but make sure all entries were integers first
-        counts_int32 = counts.astype(np.int32)
-        assert not (counts != counts_int32).nnz
-        AD_data_per_cell_type[cell_type].X = counts_int32
-        AD_data_per_cell_type[cell_type].var = \
-            AD_data_per_cell_type[cell_type].var\
-                .reset_index()\
-                .astype({'feature_name': str})\
-                .set_index('feature_name')\
-                [['gene_ids']]\
-                .rename_axis('gene')\
-                .rename(columns={'gene_ids': 'Ensembl_ID'})
-        del AD_data_per_cell_type[cell_type].uns
-        del AD_data_per_cell_type[cell_type].obsm
-        del AD_data_per_cell_type[cell_type].obsp
-    # Alternative to "ad.concat(AD_data_per_cell_type.values(), merge='same')";
-    # I suspect my version is more memory-efficient, but not sure
-    print('Merging...')
-    X = vstack([AD_data_per_cell_type[cell_type].X
-                for cell_type in AD_cell_types])
-    obs = pd.concat([AD_data_per_cell_type[cell_type].obs
-                     for cell_type in AD_cell_types])
-    var = AD_data_per_cell_type[AD_cell_types[0]].var
-    assert all(var.equals(AD_data_per_cell_type[cell_type].var)
-               for cell_type in AD_cell_types[1:])
-    AD_data = ad.AnnData(X=X, obs=obs, var=var, dtype=X.dtype)
-    # Join with external metadata file; handle two columns with mixed numbers
-    # and strings ("Age of Death" and "Fresh Brain Weight"); add broad cell type
-    print('Joining with external metadata...')
-    AD_metadata = pd.read_excel('SEA-AD/sea-ad_cohort_donor_metadata.xlsx')
-    AD_data.obs = AD_data.obs\
-        .assign(broad_cell_type=lambda df: np.where(
-            df.Class == 'Non-neuronal and Non-neural', df.Subclass, np.where(
-            df.Class == 'Neuronal: Glutamatergic', 'Excitatory', np.where(
-            df.Class == 'Neuronal: GABAergic', 'Inhibitory', np.nan))))\
-        .reset_index()\
-        .merge(AD_metadata.rename(columns=lambda col: f'Metadata: {col}'),
-               left_on='Donor ID', right_on='Metadata: Donor ID', how='left')\
-        .set_index('exp_component_name')\
-        .drop('Metadata: Donor ID', axis=1)\
-        .assign(**{'Metadata: Age at Death': lambda df:
-                       df['Metadata: Age at Death']
-                       .replace({'90+': 90})
-                       .astype('Int64'),
-                   'Metadata: Fresh Brain Weight': lambda df:
-                       df['Metadata: Fresh Brain Weight']
-                       .replace({'Unavailable': pd.NA})
-                       .astype('Int64')})
-    print('Saving...')
-    # noinspection PyTypeChecker
-    AD_data.write(AD_data_file)
+SEAAD_regions = 'DLPFC', 'MTG'
+SEAAD_data = {}
 
-gc.collect()
+for region in SEAAD_regions:
+    SEAAD_data_file = f'single-cell/SEAAD/{region}/SEAAD-{region}.head'
+    if os.path.exists(SEAAD_data_file):
+        with Timer('[{region}] Loading AD data'):
+           SEAAD_data[region]= sc.read(SEAAD_data_file)
+    else:
+        print(f'[{region}] Preprocessing AD data...')
+        from scipy.sparse import vstack
+        AD_cell_types = pd.Index(['Astrocyte', 'Chandelier', 'Endothelial', 'L23_IT', 'L4_IT',
+                                'L56_NP', 'L5_ET', 'L5_IT', 'L6_CT', 'L6_IT',
+                                'L6_IT_Car3', 'L6b', 'Lamp5', 'Lamp5_Lhx6',
+                                'Microglia-PVM', 'OPC', 'Oligodendrocyte', 'Pax6', 'Pvalb',
+                                'Sncg', 'Sst', 'Sst_Chodl', 'VLMC', 'Vip'])
+        AD_data_per_cell_type = {}
+        for cell_type in AD_cell_types:
+            print(f'[{region}] Loading {cell_type}...')
+            AD_data_per_cell_type[cell_type] = sc.read(f'single-cell/SEAAD/{region}/{cell_type}.h5ad')
+            # raw counts
+            counts = AD_data_per_cell_type[cell_type].raw.X
+            del AD_data_per_cell_type[cell_type].raw
+            # Convert to int32, but make sure all entries were integers first
+            counts_int32 = counts.astype(np.int32)
+            assert not (counts != counts_int32).nnz
+            AD_data_per_cell_type[cell_type].X = counts_int32
+            AD_data_per_cell_type[cell_type].var = \
+                AD_data_per_cell_type[cell_type].var\
+                    .reset_index()\
+                    .astype({'feature_name': str})\
+                    .set_index('feature_name')\
+                    [['gene_ids']]\
+                    .rename_axis('gene')\
+                    .rename(columns={'gene_ids': 'Ensembl_ID'})
+            del AD_data_per_cell_type[cell_type].uns
+            del AD_data_per_cell_type[cell_type].obsm
+            del AD_data_per_cell_type[cell_type].obsp
+            gc.collect()
+        # Alternative to "ad.concat(AD_data_per_cell_type.values(), merge='same')";
+        # I suspect my version is more memory-efficient, but not sure
+        print(f'[{region}] Merging...')
+        X = vstack([AD_data_per_cell_type[cell_type].X
+                    for cell_type in AD_cell_types])
+        obs = pd.concat([AD_data_per_cell_type[cell_type].obs
+                        for cell_type in AD_cell_types])
+        var = AD_data_per_cell_type[AD_cell_types[0]].var
+        assert all(var.equals(AD_data_per_cell_type[cell_type].var)
+                for cell_type in AD_cell_types[1:])
+        AD_data = ad.AnnData(X=X, obs=obs, var=var, dtype=X.dtype)
+        # Join with external metadata file; handle two columns with mixed numbers
+        # and strings ("Age of Death" and "Fresh Brain Weight"); add broad cell type
+        print('[{region}] Joining with external metadata...')
+        AD_metadata = pd.read_excel('single-cell/SEA-AD/sea-ad_cohort_donor_metadata.xlsx')
+        AD_data.obs = AD_data.obs\
+            .assign(broad_cell_type=lambda df: np.where(
+                df.Class == 'Non-neuronal and Non-neural', df.Subclass, np.where(
+                df.Class == 'Neuronal: Glutamatergic', 'Excitatory', np.where(
+                df.Class == 'Neuronal: GABAergic', 'Inhibitory', np.nan))))\
+            .reset_index()\
+            .merge(AD_metadata.rename(columns=lambda col: f'Metadata: {col}'),
+                left_on='Donor ID', right_on='Metadata: Donor ID', how='left')\
+            .set_index('exp_component_name')\
+            .drop('Metadata: Donor ID', axis=1)\
+            .assign(**{'Metadata: Age at Death': lambda df:
+                        df['Metadata: Age at Death']
+                        .replace({'90+': 90})
+                        .astype('Int64'),
+                    'Metadata: Fresh Brain Weight': lambda df:
+                        df['Metadata: Fresh Brain Weight']
+                        .replace({'Unavailable': pd.NA})
+                        .astype('Int64'),
+                        'APOE4 status': lambda df: df['APOE4 status'].eq('Y'),
+                    'Metadata: PMI': lambda df: df['Metadata: PMI'].fillna(
+                        df['Metadata: PMI'].median()),
+                    'Study: ACT': lambda df:
+                        df['Metadata: Primary Study Name'].eq('ACT'),
+                    'Study: ADRC Clinical Core': lambda df:
+                        df['Metadata: Primary Study Name'].eq('ADRC Clinical Core')})
+        print(f'[{region}] Saving...')
+        # noinspection PyTypeChecker
+        AD_data.write(SEAAD_data_file)
 
 ################################################################################
 # Load Parkinson's data (10 PD/LBD individuals and 8 neurotypical controls)
@@ -96,7 +104,7 @@ gc.collect()
 # QC procedure: nature.com/articles/s41593-022-01061-1#Sec28
 ################################################################################
 
-PD_data_file = 'Macosko/Macosko.h5ad'
+PD_data_file = 'single-cell/Macosko/Macosko.h5ad'
 if os.path.exists(PD_data_file):
     with Timer('Loading PD data'):
         PD_data = sc.read(PD_data_file)
@@ -151,7 +159,7 @@ else:
 #           synapse -u shreejoy -p danfelsky get syn30877938
 ################################################################################
 
-SCZ_data_file = 'SZBDMulticohort/SZBDMulticohort.h5ad'
+SCZ_data_file = 'single-cell/SZBDMulticohort/SZBDMulticohort.h5ad'
 if os.path.exists(SCZ_data_file):
     with Timer('Loading SCZ data'):
         SCZ_data = sc.read(SCZ_data_file)
@@ -202,64 +210,47 @@ else:
 # Load major depressive disorder data
 # - https://www.nature.com/articles/s41467-023-38530-5
 # Download: 
-# https://cells.ucsc.edu/dlpfc-mdd/matrix.mtx.gz 
-# https://cells.ucsc.edu/dlpfc-mdd/features.tsv.gz 
-# https://cells.ucsc.edu/dlpfc-mdd/barcodes.tsv.gz 
-# https://cells.ucsc.edu/dlpfc-mdd/meta.tsv 
+# - https://cells.ucsc.edu/dlpfc-mdd/matrix.mtx.gz 
+# - https://cells.ucsc.edu/dlpfc-mdd/features.tsv.gz 
+# - https://cells.ucsc.edu/dlpfc-mdd/barcodes.tsv.gz 
+# - https://cells.ucsc.edu/dlpfc-mdd/meta.tsv 
 ################################################################################
 
-MDD_data_file = 'Maitra/Maitra.h5ad'
+MDD_data_file = 'single-cell/Maitra/Maitra.h5ad'
 if os.path.exists(MDD_data_file):
     with Timer('Loading MDD data'):
         MDD_data = sc.read(MDD_data_file)
 else:
     print('Preprocessing MDD data...')
     from scipy.io import mmread  # could also use sc.read_10x_mtx()
-    MDD_counts = mmread('Maitra/matrix.mtx.gz').T.tocsr().astype(np.int32)
-    MDD_genes = pd.read_table('Maitra/features.tsv.gz', usecols=[0], index_col=0, header=None, names=[None]).index
-    MDD_cell_types = pd.read_table('Maitra/meta.tsv', usecols=['Cell','Broad'], index_col='Cell')\
+    MDD_counts = mmread('single-cell/Maitra/matrix.mtx.gz').T.tocsr().astype(np.int32)
+    MDD_genes = pd.read_table('single-cell/Maitra/features.tsv.gz', usecols=[0], index_col=0,
+                              header=None, names=[None]).index
+    MDD_metadata = pd.read_table('single-cell/Maitra/meta.tsv')\
+        .assign(ID_column=lambda df: df.Cell.str.split(".", n=1).str[0])\
+        .merge(pd.read_csv('single-cell/Maitra/Male_female_metadata_combined_Sharing_20230605.csv',
+                           usecols=['ID_column','Age','PMI']), how='left')\
         .assign(broad_cell_type=lambda df: df.Broad
-        .replace({'Ast':'Astrocyte',
-                  'End':'Endothelial',
-                  'ExN':'Excitatory',
-                  'InN':'Inhibitory',
-                  'Mic':'Microglia-PVM',
-                  'Oli':'Oligodendrocyte',
-                  'OPC':'OPC'})).astype('category')\
-        .query("Broad != 'Mix'")\
-        .astype('category')
-    MDD_metadata = pd.read_table('Maitra/meta.tsv')
-    MDD_metadata = MDD_metadata\
-        .assign(ID_column= MDD_metadata["Cell"].str.split(".", n=1).str[0])\
-        .set_index("Cell")\
+                .replace({'Ast':'Astrocyte',
+                        'End':'Endothelial',
+                        'ExN':'Excitatory',
+                        'InN':'Inhibitory',
+                        'Mic':'Microglia-PVM',
+                        'Oli':'Oligodendrocyte',
+                        'OPC':'OPC'}))\
         .astype('category')\
-        .query("Broad != 'Mix'")\
-        .combine_first(MDD_cell_types)
-    index_map = {index: i for i, index in enumerate(MDD_metadata.index)}
-    rows_to_keep = [index_map[index] for index in MDD_metadata.index]
-    MDD_counts = MDD_counts[rows_to_keep, :]
+        .astype({'Age': int, 'PMI': float})\
+        .set_index('Cell')
+
     assert len(MDD_genes) == 36588, len(MDD_genes)
-    assert len(MDD_metadata) == 156911, len(MDD_metadata)
-    assert (MDD_num_typed_cells := MDD_metadata.Cluster.notna().sum()) == \
-           156911, MDD_num_typed_cells
+    assert len(MDD_metadata) == 160711, len(MDD_metadata)
+    assert (MDD_num_typed_cells := MDD_metadata.Cluster.notna().sum()) ==\
+        160711, MDD_num_typed_cells
     assert MDD_counts.shape == (len(MDD_metadata), len(MDD_genes)), MDD_counts.shape
-    MDD_data = ad.AnnData(MDD_counts, obs=MDD_metadata, var=pd.DataFrame(
-        index=MDD_genes), dtype=MDD_counts.dtype)
+    MDD_data = ad.AnnData(MDD_counts, obs=MDD_metadata, 
+                          var=pd.DataFrame(index=MDD_genes), dtype=MDD_counts.dtype)
     # noinspection PyTypeChecker
     MDD_data.write(MDD_data_file)
-
-################################################################################
-# Deal with NAs in covariates
-################################################################################
-
-AD_data.obs = AD_data.obs\
-    .assign(**{'APOE4 status': lambda df: df['APOE4 status'].eq('Y'),
-               'Metadata: PMI': lambda df: df['Metadata: PMI'].fillna(
-                   df['Metadata: PMI'].median()),
-               'Study: ACT': lambda df:
-                   df['Metadata: Primary Study Name'].eq('ACT'),
-               'Study: ADRC Clinical Core': lambda df:
-                   df['Metadata: Primary Study Name'].eq('ADRC Clinical Core')})
 
 ################################################################################
 # Define data fields we're using
@@ -267,24 +258,26 @@ AD_data.obs = AD_data.obs\
 
 data_files = {'AD': AD_data_file, 'PD': PD_data_file, 'SCZ': SCZ_data_file, 'MDD': MDD_data_file}
 datasets = {'AD': AD_data, 'PD': PD_data, 'SCZ': SCZ_data, 'MDD': MDD_data}
-original_datasets = datasets  # for reference
 covariate_columns = {
     'AD': ['Age at death', 'sex', 'APOE4 status', 'Metadata: PMI'], 
     'PD': ['organ__ontology_label', 'sex', 'Donor_Age', 'Donor_PMI'],
     'SCZ': ['Batch', 'Gender', 'Age', 'PMI'],
-    'MDD': ['Batch', 'Chemistry', 'Condition', 'Sex']
+    'MDD': ['Batch', 'Sex', 'Chemistry', 'Condition', 'Age', 'PMI']
     }
-cell_type_column = {'AD': 'broad_cell_type', 'PD': 'broad_cell_type',
+cell_type_column = {'AD': 'broad_cell_type', 'PD': 'broad_cell_type', 
                     'SCZ': 'broad_cell_type', 'MDD': 'broad_cell_type'}
-fine_cell_type_column = {'AD': 'Supertype', 'PD': 'Cell_Type',
+fine_cell_type_column = {'AD': 'Supertype', 'PD': 'Cell_Type', 
                          'SCZ': 'Celltype', 'MDD': 'fine_cell_type'}
-ID_column = {'AD': 'Donor ID', 'PD': 'donor_id', 'SCZ': 'unique_donor_ID', 'MDD': 'ID_column'}
-phenotype_column = {'AD': 'disease', 'PD': 'disease__ontology_label', 'SCZ': 'Phenotype', 'MDD': 'Condition'}
-control_name = {'AD': 'normal', 'PD': 'normal', 'SCZ': 'CON', 'MDD': 'Control'}
+ID_column = {'AD': 'Donor ID', 'PD': 'donor_id', 
+             'SCZ': 'unique_donor_ID', 'MDD': 'ID_column'}
+phenotype_column = {'AD': 'disease', 'PD': 'disease__ontology_label', 
+                    'SCZ': 'Phenotype', 'MDD': 'Condition'}
+control_name = {'AD': 'normal', 'PD': 'normal', 
+                'SCZ': 'CON', 'MDD': 'Control'}
 assert (dataset_sizes := {dataset_name: dataset.shape
                           for dataset_name, dataset in datasets.items()}) == \
-       {'AD': (1378211, 36517), 'PD': (434354, 41625), 'SCZ': (468727, 17658), 'MDD': (156911, 36588)
-        }, dataset_sizes
+       {'AD': (1378211, 36517), 'PD': (434354, 41625), 
+        'SCZ': (468727, 17658), 'MDD': (156911, 36588)}, dataset_sizes
 
 # Make sure covariates are the same for all cells of a given person + cell-type
 
@@ -300,11 +293,10 @@ for dataset_name, dataset in datasets.items():
 
 def print_dataset_sizes(label, datasets):
     dataset_sizes = {dataset_name: dataset.shape
-                     for dataset_name, dataset in datasets.items()}
+                      for dataset_name, dataset in datasets.items()}
     print(f'{label}: {dataset_sizes}')
 
 # Filter to cells with >= 200 genes detected
-
 for dataset_name, dataset in datasets.items():
     if dataset_name != 'AD_data':
         with Timer(f'[{dataset_name}] Filtering to cells with >= 200 genes'):
@@ -312,10 +304,9 @@ for dataset_name, dataset in datasets.items():
             gc.collect()
 
 print_dataset_sizes('After filtering to cells with >= 200 genes', datasets)
-# {'AD': (1378211, 36517), 'PD': (434354, 41625), 'SCZ': (468727, 17658)}
+# {'AD': (1378211, 36517), 'PD': (434354, 41625), 'SCZ': (468727, 17658), 'MDD': (156911, 36588)}
 
 # Filter to cells with < 5% mitochondrial reads
-
 for dataset_name, dataset in datasets.items():
     if dataset_name != 'AD_data':
         with Timer(f'[{dataset_name}] Filtering to cells <5% mitochondrial reads'):
@@ -326,15 +317,11 @@ for dataset_name, dataset in datasets.items():
 
 print_dataset_sizes('After filtering to cells with <5% mitochondrial reads',
                     datasets)
-# {'AD': (1378207, 36517), 'PD': (376235, 41625), 'SCZ': (444796, 17658)}
+# {'AD': (1378207, 36517), 'PD': (376235, 41625), 'SCZ': (444796, 17658), 'MDD': (156911, 36588)}
 
 ################################################################################
 # Aggregate to pseudobulk and save
 ################################################################################
-
-# def sparse_variance(sparse_matrix, axis=None):
-#     return ((sparse_matrix - type(sparse_matrix)(np.full(
-#         sparse_matrix.shape, sparse_matrix.mean(axis)))).power(2)).mean(axis)
 
 def pseudobulk(dataset, ID_column, cell_type_column):
     # Fill with 0s to avoid auto-conversion to float when filling with NaNs;
@@ -344,35 +331,30 @@ def pseudobulk(dataset, ID_column, cell_type_column):
     pseudobulk = pd.DataFrame(
         0, index=pd.MultiIndex.from_tuples(grouped.indices),
         columns=dataset.var_names, dtype=dataset.X.dtype)
-    # variance = pd.DataFrame(
-    #     0, index=pd.MultiIndex.from_tuples(grouped.indices),
-    #     columns=dataset.var_names, dtype=float)
     for group, group_indices in grouped.indices.items():
         group_counts = dataset[group_indices].X
         pseudobulk.loc[group] = group_counts.sum(axis=0).A1
-        # variance.loc[group] = sparse_variance(group_counts, axis=0).A1
     # Take all columns of obs that have a unique value for each group;
     # reorder obs to match counts
     obs = grouped.first().loc[pseudobulk.index, grouped.nunique().le(1).all()]
     # Add number of cells as a covariate
     obs['num_cells'] = dataset.obs.groupby(groupby).size()
-    # Construct AnnData object
-    pseudobulk = ad.AnnData(pseudobulk, obs=obs, var=dataset.var,
-                            # layers={'variance': variance},
-                            dtype=dataset.X.dtype)
     # Reset index because h5ad can't store multi-indexes, but add all columns in
-    # groupby joined with _ as an index
-    pseudobulk.obs = pseudobulk.obs\
+    # groupby joined with "_" as an index
+    obs = obs\
         .reset_index()\
         .pipe(lambda df: df.set_axis(df[groupby].astype(str)
                                      .apply('_'.join, axis=1)))
+    # Construct AnnData object
+    pseudobulk = ad.AnnData(pseudobulk.values, obs=obs, var=dataset.var,
+                            dtype=dataset.X.dtype)
     return pseudobulk
 
 pseudobulks = {}
 for dataset_name, dataset in datasets.items():
     data_directory = data_files[dataset_name].split("/")[0]
-    pseudobulk_file = f'{data_directory}/pseudobulk.h5ad'
-    cell_type_counts_file = f'{data_directory}/cell_type_counts.tsv'
+    pseudobulk_file = f'pseudobulk/{data_directory}-pseudobulk.h5ad'
+    cell_type_counts_file = f'pseudobulk/{data_directory}-cell-counts.tsv'
     # if os.path.exists(pseudobulk_file): continue
     with Timer(f'[{dataset_name}] Pseudobulking'):
          pseudobulks[dataset_name] = pseudobulk(
@@ -380,16 +362,16 @@ for dataset_name, dataset in datasets.items():
     with Timer(f'[{dataset_name}] Saving pseudobulk'):
         # noinspection PyTypeChecker
         pseudobulks[dataset_name].write(pseudobulk_file)
-    with Timer(f'[{dataset_name}] Saving cell-type counts'):
-        cell_type_counts = dataset.obs\
-            .groupby([cell_type_column[dataset_name],
-                      fine_cell_type_column[dataset_name]],
-                     observed=True, sort=False)\
-            [ID_column[dataset_name]]\
-            .value_counts()\
-            .unstack()\
-            .pipe(lambda df: df.loc[:, df.sum() > 0])
-        cell_type_counts.to_csv(cell_type_counts_file, sep='\t')
+    # with Timer(f'[{dataset_name}] Saving cell-type counts'):
+    #     cell_type_counts = dataset.obs\
+    #         .groupby([cell_type_column[dataset_name],
+    #                   fine_cell_type_column[dataset_name]],
+    #                  observed=True, sort=False)\
+    #         [ID_column[dataset_name]]\
+    #         .value_counts()\
+    #         .unstack()\
+    #         .pipe(lambda df: df.loc[:, df.sum() > 0])
+    #     cell_type_counts.to_csv(cell_type_counts_file, sep='\t')
 
 print_dataset_sizes('After pseudobulking', pseudobulks)
 # {'AD': (709, 36517), 'PD': (144, 41625), 'SCZ': (1052, 17658)}
@@ -420,9 +402,63 @@ print_dataset_sizes('After pseudobulking', pseudobulks)
 # Save preprocessed p400 pseudobulks as .h5ad for consistency 
 ################################################################################
 
-meta = pd.read_csv('/external/rprshnas01/external_data/rosmap/phenotype/phenotypes_april_21_2023/dataset_978_basic_04-21-2023.csv')\
-    .drop_duplicates(subset='projid')
-df = pd.read_csv('/nethome/kcni/karbabi/stlab/rosmap_p400/p400_pseudobulk.tsv', sep='\t')\
+# Check that all duplicate projids have the same metadata
+assert not any(pd.read_csv('pseudobulk/dataset_978_basic_04-21-2023_ordered.csv')\
+                   [lambda meta: meta.duplicated('projid', keep=False)]\
+                   .groupby('projid')\
+                   .apply(lambda x: x.nunique() > 1)\
+                   .sum(axis=1) > 0)
+
+obs = pd.read_csv('pseudobulk/dataset_978_basic_04-21-2023.csv')\
+    .drop_duplicates(subset='projid')\
+    .set_index('projid')\
+    .apply(lambda col: col.replace({' ': pd.NA, 'NA': pd.NA, '<NA>': pd.NA, 'nan': pd.NA}))\
+    .dropna(axis=1, how='all')\
+    .astype({
+        'study': 'category', 'scaled_to': 'category', 
+        'apoe_genotype': 'category', 'amyloid': 'float', 'plaq_d': 'float', 
+        'plaq_n': 'float', 'braaksc': 'category', 'ceradsc': 'category', 
+        'gpath': 'float', 'niareagansc': 'category', 'tangles': 'float', 
+        'nft': 'float', 'cogdx': 'category', 'age_bl': 'float', 
+        'age_death': 'float', 'pmi': 'float', 'msex': 'bool', 'race7': 'category', 
+        'educ': 'int32', 'spanish': 'object', 
+        'ldai_bl': 'category', 'smoking': 'category', 'cancer_bl': 'category', 
+        'headinjrloc_bl': 'category', 'thyroid_bl': 'category', 
+        'agreeableness': 'category', 'conscientiousness': 'category', 
+        'extraversion_6': 'category', 'neuroticism_12': 'category', 
+        'openness': 'category', 'chd_cogact_freq': 'category', 
+        'lifetime_cogact_freq_bl': 'float', 'ma_adult_cogact_freq': 'category', 
+        'ya_adult_cogact_freq': 'category', 'hspath_typ': 'category', 
+        'dlbdx': 'category', 'arteriol_scler': 'category', 'caa_4gp': 'category', 
+        'cvda_4gp2': 'category', 'ci_num2_gct': 'category', 
+        'ci_num2_mct': 'category', 'emotional_neglect': 'category', 
+        'family_pro_sep': 'category', 'financial_need': 'category', 
+        'parental_intimidation': 'category', 'parental_violence': 'category', 
+        'tot_adverse_exp': 'category', 'angerin': 'category', 
+        'angerout': 'category', 'angertrait': 'category', 
+        'disord_regiment': 'category', 'explor_rigid': 'category', 
+        'extrav_reserv': 'category', 'haanticipatoryworry': 'category', 
+        'hafatigability': 'category', 'hafearuncetainty': 'category', 
+        'harmavoidance': 'category', 'hashyness': 'category', 
+        'impul_reflect': 'category', 'nov_seek': 'category', 
+        'tomm40_hap': 'category', 'age_first_ad_dx': 'float', 
+        'marital_now_bl': 'category', 'agefirst': 'category', 
+        'agelast': 'category', 'menoage': 'category', 'mensage': 'category', 
+        'natura': 'category', 'othspe00': 'category', 'whatwas': 'category', 
+        'med_con_sum_bl': 'category', 'ad_reagan': 'category', 
+        'mglia123_caud_vm': 'float', 'mglia123_it': 'float', 
+        'mglia123_mf': 'float', 'mglia123_put_p': 'float', 
+        'mglia23_caud_vm': 'category', 'mglia23_it': 'float', 
+        'mglia23_mf': 'float', 'mglia23_put_p': 'float', 
+        'mglia3_caud_vm': 'category', 'mglia3_it': 'category', 
+        'mglia3_mf': 'category', 'mglia3_put_p': 'category', 'tdp_st4': 'category', 
+        'cog_res_age12': 'category', 'cog_res_age40': 'category', 
+        'tot_cog_res': 'category', 'early_hh_ses': 'float', 
+        'income_bl': 'category', 'ladder_composite': 'category', 
+        'mateduc': 'category', 'pareduc': 'category', 'pateduc': 'category', 
+        'q40inc': 'category'})
+    
+counts = pd.read_csv('pseudobulk/p400_pseudobulk.tsv', sep='\t', index='ID')\
     .assign(broad_cell_type=lambda df: df.cell_type
     .replace({'Astro':'Astrocyte',
             'Endo':'Endothelial',
@@ -430,9 +466,9 @@ df = pd.read_csv('/nethome/kcni/karbabi/stlab/rosmap_p400/p400_pseudobulk.tsv', 
             'GABA':'Inhibitory',
             'Micro':'Microglia-PVM',
             'Oligo':'Oligodendrocyte',
-            'OPC':'OPC'}))\
-    .astype('category')\
-    .merge(meta, left_on='ID', right_on='projid', how='left')
+            'OPC':'OPC'}))
+    
+    
 adata = ad.AnnData(X=df.drop(columns=['cell_type', 'broad_cell_type', 'ID', 'num_cells']).values,
                    obs=df[['cell_type', 'broad_cell_type', 'ID', 'num_cells'] + meta.columns.tolist()])
 adata.var['genes'] = df.columns[4:]

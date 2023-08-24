@@ -1,52 +1,37 @@
-import anndata as ad, gc, matplotlib.pyplot as plt, numpy as np, os, sys, \
-    pandas as pd, scanpy as sc, seaborn as sns, warnings
+import matplotlib.pyplot as plt, numpy as np, os, sys, \
+    pandas as pd, scanpy as sc, seaborn as sns
 from rpy2.robjects import r
-from scipy.sparse import csr_matrix 
 from scipy.stats import sem
-from matplotlib.colors import ListedColormap
-sys.path.append('projects/reverse_signatures/scripts')
-from utils import array_to_rmatrix, highly_variable_genes, rdf_to_df, rmatrix_to_df, \
-      savefig, scientific_notation, Timer
+
+sys.path.append('/home/s/shreejoy/karbabi/projects/reverse_signatures/scripts')
+from utils import array_to_rmatrix, highly_variable_genes, rdf_to_df, rmatrix_to_df, savefig
+    
 r.library('RcppML')
-os.chdir('projects/reverse_signatures')
+os.chdir('/home/s/shreejoy/karbabi/projects/reverse_signatures')
 
 # for each cell broad cell type and study 
 broad_cell_types = 'Excitatory','Inhibitory','Oligodendrocyte','Astrocyte','Microglia-PVM','OPC','Endothelial'
-study_names = 'ROSMAP', 'SEAAD' #'SZBDMulticohort',
+study_names = 'Maitra', 'Macosko'
+#'SZBDMulticohort', 'ROSMAP', 'SEAAD', 
 
 # temp 
-cell_type = 'Inhibitory'
-study_name = 'ROSMAP'
+cell_type = 'Excitatory'
+study_name = 'SEAAD'
 
 for study_name in study_names:
     for cell_type in broad_cell_types:
-
+        
         # load pseudobulks 
-        adata = sc.read(f'data/pseudobulks/{study_name}-pseudobulk.h5ad')
+        adata = sc.read(f'data/pseudobulk/{study_name}-pseudobulk.h5ad')
         adata = adata[adata.obs['broad_cell_type'] == cell_type, :]
 
-        # # subset to the 2000 most highly variable genes 
-        # hvg = highly_variable_genes(adata).highly_variable
-        # adata = adata[:, hvg].copy()
-
-        # subset to case-control differentially expressed genes 
-        degs = pd.read_csv('/home/s/shreejoy/karbabi/projects/reverse_signatures/data/DE/de_aspan_voombygroup_p400.tsv', sep='\t')\
-            .assign(broad_cell_type=lambda df: df.cell_type
-                    .replace({'Astro':'Astrocyte',
-                              'Endo':'Endothelial',
-                              'Glut':'Excitatory',
-                              'GABA':'Inhibitory',
-                              'Micro':'Microglia-PVM',
-                              'Oligo':'Oligodendrocyte',
-                              'OPC':'OPC'}))\
-            .query(f'broad_cell_type == "{cell_type}" & ids == "allids" & study == "p400"')\
-            .sort_values('fdr')\
-            .head(1000)
-        degs = degs['gene'].astype(str).tolist()   
-        adata = adata[:, adata.var_names.isin(degs)].copy()
-
-        # convert counts to CPMs
-        adata.X = np.log2((adata.X * 1000000 / adata.X.sum(axis=1)[:, None]) + 1)
+        # subset to the 2000 most highly variable genes 
+        hvg = highly_variable_genes(adata).highly_variable
+        adata = adata[:, hvg].copy()
+        
+        # convert to log CPMs
+        np.log1p(adata.X * (1000000 / adata.X.sum(axis=1))[:, None], out=adata.X)
+        adata.X *= 1 / np.log(2)
 
         # convert to R
         # RcppML internally coerces to a dgcMatrix, so transpose the counts
@@ -101,11 +86,13 @@ for study_name in study_names:
         os.makedirs('results/NMF', exist_ok=True)
         W.to_csv(f'results/NMF/{study_name}-{cell_type}_W.tsv', sep='\t')
         H.to_csv(f'results/NMF/{study_name}-{cell_type}_H.tsv', sep='\t')
+            
+
 
 for study_name in study_names:
     for cell_type in broad_cell_types:
 
-        adata = sc.read(f'data/pseudobulks/{study_name}-pseudobulk.h5ad')
+        adata = sc.read(f'data/pseudobulk/{study_name}-pseudobulk.h5ad')
         adata = adata[adata.obs['broad_cell_type'] == cell_type, :]
 
         if study_name == 'SEAAD':
@@ -245,3 +232,27 @@ for study_name in study_names:
         # save
         os.makedirs('results/consensus', exist_ok=True)
         plt.savefig(f'results/consensus/{study_name}-{cell_type}_consensus_heatmap.png')
+        
+        
+        
+        
+        
+        
+        
+        
+        
+                    # # subset to case-control differentially expressed genes 
+            # degs = pd.read_csv('/home/s/shreejoy/karbabi/projects/reverse_signatures/data/DE/de_aspan_voombygroup_p400.tsv', sep='\t')\
+            #     .assign(broad_cell_type=lambda df: df.cell_type
+            #             .replace({'Astro':'Astrocyte',
+            #                       'Endo':'Endothelial',
+            #                       'Glut':'Excitatory',
+            #                       'GABA':'Inhibitory',
+            #                       'Micro':'Microglia-PVM',
+            #                       'Oligo':'Oligodendrocyte',
+            #                       'OPC':'OPC'}))\
+            #     .query(f'broad_cell_type == "{cell_type}" & ids == "allids" & study == "p400"')\
+            #     .sort_values('fdr')\
+            #     .head(1000)
+            # degs = degs['gene'].astype(str).tolist()   
+            # adata = adata[:, adata.var_names.isin(degs)].copy()
