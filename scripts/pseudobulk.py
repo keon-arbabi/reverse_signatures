@@ -12,35 +12,32 @@ os.chdir('/home/s/shreejoy/karbabi/projects/reverse_signatures/data')
 # Load Alzheimer's data
 # Documentation: https://portal.brain-map.org/explore/seattle-alzheimers-disease/seattle-alzheimers-disease-brain-cell-atlas-download
 # Data: https://cellxgene.cziscience.com/collections/1ca90a2d-2943-483d-b678-b809bf464c30
-# Metadata columns: brainmapportal-live-4cc80a57cd6e400d854-f7fdcae.divio-media.net/filer_public/b0/a8/b0a81899-7241-4814-8c1f-4a324db51b0b/sea-ad_donorindex_dataelementbriefdescriptions.pdf
+# Metadata columns: brainmapportal-live-4cc80a57cd6e400d854-f7fdcae.divio-media.net/filer_public/b0/a8/b0a81899-7241-4814-8c1f-4a324db51b0b/
+# sea-ad_donorindex_dataelementbriefdescriptions.pdf
 ################################################################################
 
 SEAAD_regions = 'DLPFC', 'MTG'
 SEAAD_data = {}
 
 for region in SEAAD_regions:
-    SEAAD_data_file = f'single-cell/SEAAD/{region}/SEAAD-{region}.head'
+    SEAAD_data_file = f'single-cell/SEAAD/{region}/SEAAD-{region}.h5ad'
     if os.path.exists(SEAAD_data_file):
         with Timer('[{region}] Loading AD data'):
            SEAAD_data[region]= sc.read(SEAAD_data_file)
     else:
         print(f'[{region}] Preprocessing AD data...')
         from scipy.sparse import vstack
-        # AD_cell_types = pd.Index(['Astrocyte', 'Chandelier', 'Endothelial', 'L23_IT', 'L4_IT',
-        #                         'L56_NP', 'L5_ET', 'L5_IT', 'L6_CT', 'L6_IT',
-        #                         'L6_IT_Car3', 'L6b', 'Lamp5', 'Lamp5_Lhx6',
-        #                         'Microglia-PVM', 'OPC', 'Oligodendrocyte', 'Pax6', 'Pvalb',
-        #                         'Sncg', 'Sst', 'Sst_Chodl', 'VLMC', 'Vip'])
-        
-        AD_cell_types = pd.Index(['Sst_Chodl', 'Endothelial'])
+        AD_cell_types = pd.Index(['Astrocyte', 'Chandelier', 'Endothelial', 'L23_IT', 'L4_IT',
+                                'L56_NP', 'L5_ET', 'L5_IT', 'L6_CT', 'L6_IT',
+                                'L6_IT_Car3', 'L6b', 'Lamp5', 'Lamp5_Lhx6',
+                                'Microglia-PVM', 'OPC', 'Oligodendrocyte', 'Pax6', 'Pvalb',
+                                'Sncg', 'Sst', 'Sst_Chodl', 'VLMC', 'Vip'])
         AD_data_per_cell_type = {}
         for cell_type in AD_cell_types:
             print(f'[{region}] Loading {cell_type}...')
             AD_data_per_cell_type[cell_type] = sc.read(f'single-cell/SEAAD/{region}/{cell_type}.h5ad')
-            # raw counts
             counts = AD_data_per_cell_type[cell_type].raw.X
             del AD_data_per_cell_type[cell_type].raw
-            # Convert to int32, but make sure all entries were integers first
             counts_int32 = counts.astype(np.int32)
             assert not (counts != counts_int32).nnz
             AD_data_per_cell_type[cell_type].X = counts_int32
@@ -69,44 +66,48 @@ for region in SEAAD_regions:
         
         print(f'[{region}] Joining with external metadata...')
         AD_metadata = pd.read_excel('single-cell/SEAAD/sea-ad_cohort_donor_metadata.xlsx')\
-            # avoid duplicates
             .drop(['CERAD score','LATE','APOE4 Status','Cognitive Status',
                    'Overall AD neuropathological Change','Highest Lewy Body Disease',
                    'Thal','Braak'], axis=1)
         AD_data.obs = AD_data.obs\
-            .drop(['PMI', 'Years of education', 'sex'], axis=1)\
-            .loc[:, lambda df: ~df.apply(lambda col: col.isin(['checked', 'unchecked'])).all()]\
+            .drop(['PMI', 'Years of education', 'sex', 'Age at death'], axis=1)\
             .assign(broad_cell_type=lambda df: np.where(
                 df.Class == 'Non-neuronal and Non-neural', df.Subclass, np.where(
                 df.Class == 'Neuronal: Glutamatergic', 'Excitatory', np.where(
                 df.Class == 'Neuronal: GABAergic', 'Inhibitory', np.nan))))\
             .reset_index()\
             .merge(AD_metadata, left_on='donor_id', right_on='Donor ID', how='left')\
+            .loc[:, lambda df: ~df.columns.str.contains('choice')]\
             .set_index('exp_component_name')\
             .drop('Donor ID', axis=1)\
-            .apply(lambda col: col.replace({' ': pd.NA, 'NA': pd.NA, '<NA>': pd.NA, 'nan': pd.NA}))\
             .assign(**{
-                    'cognitive_status': lambda df: df['Cognitive status'].astype(str)
+                    'Cognitive status': lambda df: df['Cognitive status'].astype(str)
                         .map({'Reference': 0, 'No dementia': 1, 'Dementia': 2})
                         .astype('int32'),
-                    'adnc': lambda df: df['ADNC'].astype(str)\
+                    'ADNC': lambda df: df['ADNC'].astype(str)
                         .map({'Reference': 0, 'Not AD': 1, 'Low': 2, 'Intermediate': 3, 'High': 4})
                         .astype('Int32'),
-                    'braak_stage': lambda df: df['Braak stage'].astype(str)
+                    'Braak stage': lambda df: df['Braak stage'].astype(str)
                         .map({'Reference': 0, 'Braak 0': 1, 'Braak II': 2, 'Braak III': 3, 
                               'Braak IV': 4, 'Braak V': 5, 'Braak VI': 6})
                         .astype('Int32'),
-                    'thal_phase': lambda df: df['Thal phase'].astype(str)
+                    'Thal phase': lambda df: df['Thal phase'].astype(str)
                         .map({'Reference': 0, 'Thal 0': 1, 'Thal 1': 2, 'Thal 2': 3, 'Thal 3': 4, 
                               'Thal 4': 5, 'Thal 5': 6})
                         .astype('Int32'),
-                    'cerad_score': lambda df: df['CERAD score']
+                    'CERAD score': lambda df: df['CERAD score']
                         .map({'Reference': 0, 'Absent': 1, 'Sparse': 2, 'Moderate': 3, 'Frequent': 4})
                         .astype('Int32'),
-                    'late_nc_stage': lambda df: df['LATE-NC stage'].astype(str)
+                    'LATE-NC stage': lambda df: df['LATE-NC stage'].astype(str)
                         .map({'Staging Precluded by FTLD with TDP43 or ALS/MND or TDP-43 pathology is unclassifiable': 0,
                               'Reference': 0, 'Not Identified': 1,'LATE Stage 1': 2, 'LATE Stage 2': 3, 'LATE Stage 3': 4})
-                        .astype('Int32'),   
+                        .astype('Int32'),  
+                    'Atherosclerosis': lambda df: df['Atherosclerosis'].astype(str)
+                        .map({'Mild': 1, 'Moderate': 2, 'Severe': 2})
+                        .astype('Int32'),  
+                    'Arteriolosclerosis': lambda df: df['Arteriolosclerosis'].astype(str)
+                        .map({'Mild': 1, 'Moderate': 2, 'Severe': 2})
+                        .astype('Int32'),  
                     'PMI': lambda df: df['PMI'].fillna(df['PMI'].median())
                         .astype(float),
                     'Fresh Brain Weight': lambda df: df['Fresh Brain Weight']
@@ -116,24 +117,26 @@ for region in SEAAD_regions:
                     'Neurotypical reference': lambda df: df['Neurotypical reference'].eq('True'),
                     'ACT': lambda df: df['Primary Study Name'].eq('ACT'),
                     'ADRC Clinical Core': lambda df: df['Primary Study Name'].eq('ADRC Clinical Core')})\
-            .assign(**{key: lambda df, key=key: df[key].replace({'90+': 90})
-                        .astype('Int64')
-                        for key in ('Age at Death','Age of onset cognitive symptoms','Age of Dementia diagnosis')})\
-            .astype({'Subclass': 'category', 'Supertype': 'category', 'Cognitive status': 'category',
-                     'ADNC': 'category', 'Braak stage': 'category', 'Thal phase': 'category',
-                     'CERAD score': 'category', 'Lewy body disease pathology': 'category', 
-                     'LATE-NC stage': 'category', 'Microinfarct pathology': 'category', 'Specimen ID': 'category',
-                     'Number of UMIs': 'Int64', 'Genes detected': 'Int64', 'Fraction mitochrondrial UMIs': float,
-                     'cell_type': 'category', 'assay': 'category', 'disease': 'category', 'Sex': 'category',
-                     'tissue': 'category', 'self_reported_ethnicity': 'category', 'broad_cell_type': 'category',
-                     'Years of education': 'Int32', 'Last CASI Score': 'Int32', 
-                     })
+            .assign(**{key: lambda df, key=key: pd.to_numeric(df[key].replace('90+', '90')).astype('Int64')
+                       for key in ('Age at Death','Age of onset cognitive symptoms','Age of Dementia diagnosis')})\
+            .astype({
+                'ADNC': 'category', 'assay': 'category', 'Braak stage': 'category', 'Brain pH': float, 
+                'CERAD score': 'category', 'Cognitive status': 'category', 'Fraction mitochrondrial UMIs': float, 
+                'Genes detected': 'Int64', 'Last CASI Score': 'Int32', 'LATE-NC stage': 'category', 
+                'Lewy body disease pathology': 'category', 'Microinfarct pathology': 'category', 'Number of UMIs': 'Int64', 
+                'RIN': float, 'Sex': 'category', 'Specimen ID': 'category', 'Subclass': 'category', 'Supertype': 'category', 
+                'Thal phase': 'category', 'Total Microinfarcts (not observed grossly)': 'Int32', 
+                'Total microinfarcts in screening sections': 'Int32', 'Years of education': 'Int32', 
+                'assay': 'category', 'broad_cell_type': 'category', 'cell_type': 'category', 'disease': 'category', 
+                'self_reported_ethnicity': 'category', 'tissue': 'category'})\
+            .pipe(lambda df: df.assign(**{col + '_num': df.groupby('donor_id')['Subclass']
+                                          .transform(lambda x: (x == col).sum()) for col in df['Subclass'].unique()}))
+
+        AD_data.obs.to_csv('tmp.csv')
         print(f'[{region}] Saving...')
         # noinspection PyTypeChecker
         AD_data.write(SEAAD_data_file)
-        
-                            'Age at Death': lambda df: df['Age at Death'].replace({'90+': 90})
-                        .astype('Int64'),
+
 
 ################################################################################
 # Load Parkinson's data (10 PD/LBD individuals and 8 neurotypical controls)
