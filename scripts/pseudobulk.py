@@ -9,6 +9,37 @@ os.chdir('/home/s/shreejoy/karbabi/projects/reverse_signatures/data')
 # e.g. pseudobulking AD took 32 hours with CSC but only 31 minutes with CSR
 
 ################################################################################
+# Aggregate to pseudobulk and save
+################################################################################
+
+def pseudobulk(dataset, ID_column, cell_type_column):
+    # fill with 0s to avoid auto-conversion to float when filling with NaNs;
+    # skip groups where any of the columns is NaN
+    groupby = [ID_column, cell_type_column]
+    grouped = dataset.obs.groupby(groupby, observed=True, sort=False)
+    pseudobulk = pd.DataFrame(
+        0, index=pd.MultiIndex.from_tuples(grouped.indices),
+        columns=dataset.var_names, dtype=dataset.X.dtype)
+    for group, group_indices in grouped.indices.items():
+        group_counts = dataset[group_indices].X
+        pseudobulk.loc[group] = group_counts.sum(axis=0).A1
+    # take all columns of obs that have a unique value for each group;
+    # reorder obs to match counts
+    obs = grouped.first().loc[pseudobulk.index, grouped.nunique().le(1).all()]
+    # add number of cells as a covariate
+    obs['num_cells'] = dataset.obs.groupby(groupby).size()
+    # reset index because h5ad can't store multi-indexes, but add all columns in
+    # groupby joined with "_" as an index
+    obs = obs\
+        .reset_index()\
+        .pipe(lambda df: df.set_axis(df[groupby].astype(str)
+                                     .apply('_'.join, axis=1)))
+    # Construct AnnData object
+    pseudobulk = ad.AnnData(pseudobulk.values, obs=obs, var=dataset.var,
+                            dtype=dataset.X.dtype)
+    return pseudobulk
+
+################################################################################
 # Load Alzheimer's data
 # Documentation: https://portal.brain-map.org/explore/seattle-alzheimers-disease/seattle-alzheimers-disease-brain-cell-atlas-download
 # Data: https://cellxgene.cziscience.com/collections/1ca90a2d-2943-483d-b678-b809bf464c30
@@ -16,67 +47,81 @@ os.chdir('/home/s/shreejoy/karbabi/projects/reverse_signatures/data')
 # sea-ad_donorindex_dataelementbriefdescriptions.pdf
 ################################################################################
 
-SEAAD_regions = 'DLPFC', 'MTG'
-SEAAD_data = {}
+# select either DLPFC or MTG
+region = 'DLPFC'
 
-for region in SEAAD_regions:
-    SEAAD_data_file = f'single-cell/SEAAD/{region}/SEAAD-{region}.h5ad'
-    if os.path.exists(SEAAD_data_file):
-        with Timer('[{region}] Loading AD data'):
-           SEAAD_data[region]= sc.read(SEAAD_data_file)
-    else:
-        print(f'[{region}] Preprocessing AD data...')
+data_file = f'single-cell/SEAAD/{region}/SEAAD-{region}.h5ad'
+if os.path.exists(data_file):
+    with Timer(f'[SEAAD {region}] Loading AD data'):
+        data = sc.read(data_file)
+else:
+    with Timer(f'[SEAAD {region}] Preprocessing AD data'):
         from scipy.sparse import vstack
-        AD_cell_types = pd.Index(['Astrocyte', 'Chandelier', 'Endothelial', 'L23_IT', 'L4_IT',
+        cell_types = pd.Index(['Astrocyte', 'Chandelier', 'Endothelial', 'L23_IT', 'L4_IT',
                                 'L56_NP', 'L5_ET', 'L5_IT', 'L6_CT', 'L6_IT',
                                 'L6_IT_Car3', 'L6b', 'Lamp5', 'Lamp5_Lhx6',
                                 'Microglia-PVM', 'OPC', 'Oligodendrocyte', 'Pax6', 'Pvalb',
                                 'Sncg', 'Sst', 'Sst_Chodl', 'VLMC', 'Vip'])
-        AD_data_per_cell_type = {}
-        for cell_type in AD_cell_types:
-            print(f'[{region}] Loading {cell_type}...')
-            AD_data_per_cell_type[cell_type] = sc.read(f'single-cell/SEAAD/{region}/{cell_type}.h5ad')
-            counts = AD_data_per_cell_type[cell_type].raw.X
-            del AD_data_per_cell_type[cell_type].raw
+        data_per_cell_type = {}
+        for cell_type in cell_types:
+            print(f'[SEAAD {region}] Loading {cell_type}...')
+            data_per_cell_type[cell_type] = sc.read(f'single-cell/SEAAD/{region}/{cell_type}.h5ad')
+            # check that there is no file name mismatch
+            assert all(data_per_cell_type[cell_type].obs['Subclass'].str.replace('/', '').str.replace(' ', '_') == cell_type),\
+                        f"Mismatch detected in {cell_type}"
+            counts = data_per_cell_type[cell_type].raw.X
+            del data_per_cell_type[cell_type].raw
+            # convert to int32, but make sure all entries were integers first
             counts_int32 = counts.astype(np.int32)
             assert not (counts != counts_int32).nnz
-            AD_data_per_cell_type[cell_type].X = counts_int32
-            AD_data_per_cell_type[cell_type].var = \
-                AD_data_per_cell_type[cell_type].var\
+            data_per_cell_type[cell_type].X = counts_int32
+            data_per_cell_type[cell_type].var = \
+                data_per_cell_type[cell_type].var\
                     .reset_index()\
                     .astype({'feature_name': str})\
                     .set_index('feature_name')\
                     [['gene_ids']]\
                     .rename_axis('gene')\
                     .rename(columns={'gene_ids': 'Ensembl_ID'})
-            del AD_data_per_cell_type[cell_type].uns
-            del AD_data_per_cell_type[cell_type].obsm
-            del AD_data_per_cell_type[cell_type].obsp
+            # QC per cell type; there are memory issues doing this for the whole dataset
+            # should already be performed by original authors 
+            num_cells_i = data_per_cell_type[cell_type].shape[0]
+            sc.pp.filter_cells(data_per_cell_type[cell_type], min_genes=200)
+            mitochondrial_genes = data_per_cell_type[cell_type].var.index.str.startswith('MT-')
+            percent_mito = data_per_cell_type[cell_type][:, mitochondrial_genes].X.sum(axis=1).A1 / \
+                data_per_cell_type[cell_type].X.sum(axis=1).A1
+            data_per_cell_type[cell_type] = data_per_cell_type[cell_type][percent_mito < 0.05]
+            num_cells_f = data_per_cell_type[cell_type].shape[0]
+            print(f"[SEAAD {region}] Dropped {num_cells_i - num_cells_f} {cell_type} cells after QC.")
+            # clean-up
+            del data_per_cell_type[cell_type].uns
+            del data_per_cell_type[cell_type].obsm
+            del data_per_cell_type[cell_type].obsp
             gc.collect()
-            
-        print(f'[{region}] Merging...')
-        X = vstack([AD_data_per_cell_type[cell_type].X
-                    for cell_type in AD_cell_types])
-        obs = pd.concat([AD_data_per_cell_type[cell_type].obs
-                        for cell_type in AD_cell_types])
-        var = AD_data_per_cell_type[AD_cell_types[0]].var
-        assert all(var.equals(AD_data_per_cell_type[cell_type].var)
-                for cell_type in AD_cell_types[1:])
-        AD_data = ad.AnnData(X=X, obs=obs, var=var, dtype=X.dtype)
+        # combine across cell types 
+        print(f'[SEAAD {region}] Merging...')
+        X = vstack([data_per_cell_type[cell_type].X
+                    for cell_type in cell_types])
+        obs = pd.concat([data_per_cell_type[cell_type].obs
+                        for cell_type in cell_types])
+        var = data_per_cell_type[cell_types[0]].var
+        assert all(var.equals(data_per_cell_type[cell_type].var)
+                for cell_type in cell_types[1:])
+        data = ad.AnnData(X=X, obs=obs, var=var, dtype=X.dtype)
         
-        print(f'[{region}] Joining with external metadata...')
-        AD_metadata = pd.read_excel('single-cell/SEAAD/sea-ad_cohort_donor_metadata.xlsx')\
+        print(f'[SEAAD {region}] Joining with external metadata...')
+        metadata = pd.read_excel('single-cell/SEAAD/sea-ad_cohort_donor_metadata.xlsx')\
             .drop(['CERAD score','LATE','APOE4 Status','Cognitive Status',
-                   'Overall AD neuropathological Change','Highest Lewy Body Disease',
-                   'Thal','Braak'], axis=1)
-        AD_data.obs = AD_data.obs\
+                'Overall AD neuropathological Change','Highest Lewy Body Disease',
+                'Thal','Braak'], axis=1)
+        data.obs = data.obs\
             .drop(['PMI', 'Years of education', 'sex', 'Age at death'], axis=1)\
             .assign(broad_cell_type=lambda df: np.where(
                 df.Class == 'Non-neuronal and Non-neural', df.Subclass, np.where(
                 df.Class == 'Neuronal: Glutamatergic', 'Excitatory', np.where(
                 df.Class == 'Neuronal: GABAergic', 'Inhibitory', np.nan))))\
             .reset_index()\
-            .merge(AD_metadata, left_on='donor_id', right_on='Donor ID', how='left')\
+            .merge(metadata, left_on='donor_id', right_on='Donor ID', how='left')\
             .loc[:, lambda df: ~df.columns.str.contains('choice')]\
             .set_index('exp_component_name')\
             .drop('Donor ID', axis=1)\
@@ -89,18 +134,18 @@ for region in SEAAD_regions:
                         .astype('Int32'),
                     'Braak stage': lambda df: df['Braak stage'].astype(str)
                         .map({'Reference': 0, 'Braak 0': 1, 'Braak II': 2, 'Braak III': 3, 
-                              'Braak IV': 4, 'Braak V': 5, 'Braak VI': 6})
+                            'Braak IV': 4, 'Braak V': 5, 'Braak VI': 6})
                         .astype('Int32'),
                     'Thal phase': lambda df: df['Thal phase'].astype(str)
                         .map({'Reference': 0, 'Thal 0': 1, 'Thal 1': 2, 'Thal 2': 3, 'Thal 3': 4, 
-                              'Thal 4': 5, 'Thal 5': 6})
+                            'Thal 4': 5, 'Thal 5': 6})
                         .astype('Int32'),
                     'CERAD score': lambda df: df['CERAD score']
                         .map({'Reference': 0, 'Absent': 1, 'Sparse': 2, 'Moderate': 3, 'Frequent': 4})
                         .astype('Int32'),
                     'LATE-NC stage': lambda df: df['LATE-NC stage'].astype(str)
                         .map({'Staging Precluded by FTLD with TDP43 or ALS/MND or TDP-43 pathology is unclassifiable': 0,
-                              'Reference': 0, 'Not Identified': 1,'LATE Stage 1': 2, 'LATE Stage 2': 3, 'LATE Stage 3': 4})
+                            'Reference': 0, 'Not Identified': 1,'LATE Stage 1': 2, 'LATE Stage 2': 3, 'LATE Stage 3': 4})
                         .astype('Int32'),  
                     'Atherosclerosis': lambda df: df['Atherosclerosis'].astype(str)
                         .map({'Mild': 1, 'Moderate': 2, 'Severe': 2})
@@ -118,7 +163,7 @@ for region in SEAAD_regions:
                     'ACT': lambda df: df['Primary Study Name'].eq('ACT'),
                     'ADRC Clinical Core': lambda df: df['Primary Study Name'].eq('ADRC Clinical Core')})\
             .assign(**{key: lambda df, key=key: pd.to_numeric(df[key].replace('90+', '90')).astype('Int64')
-                       for key in ('Age at Death','Age of onset cognitive symptoms','Age of Dementia diagnosis')})\
+                    for key in ('Age at Death','Age of onset cognitive symptoms','Age of Dementia diagnosis')})\
             .astype({
                 'ADNC': 'category', 'assay': 'category', 'Braak stage': 'category', 'Brain pH': float, 
                 'CERAD score': 'category', 'Cognitive status': 'category', 'Fraction mitochrondrial UMIs': float, 
@@ -130,13 +175,14 @@ for region in SEAAD_regions:
                 'assay': 'category', 'broad_cell_type': 'category', 'cell_type': 'category', 'disease': 'category', 
                 'self_reported_ethnicity': 'category', 'tissue': 'category'})\
             .pipe(lambda df: df.assign(**{col + '_num': df.groupby('donor_id')['Subclass']
-                                          .transform(lambda x: (x == col).sum()) for col in df['Subclass'].unique()}))
-
-        AD_data.obs.to_csv('tmp.csv')
-        print(f'[{region}] Saving...')
-        # noinspection PyTypeChecker
-        AD_data.write(SEAAD_data_file)
-
+                                        .transform(lambda x: (x == col).sum()) for col in df['Subclass'].unique()}))
+        print(f'[SEAAD {region}] Saving...')
+        data.write(data_file)
+        
+with Timer(f'[SEAAD {region}] Pseudobulking'):
+        pseudobulk = pseudobulk(data, 'donor_id', 'broad_cell_type')
+with Timer(f'[SEAAD {region}] Saving pseudobulk'):
+        pseudobulk.write(f'pseudobulk/SEAAD-{region}-broad.h5ad')
 
 ################################################################################
 # Load Parkinson's data (10 PD/LBD individuals and 8 neurotypical controls)
@@ -297,7 +343,7 @@ else:
 ################################################################################
 
 data_files = {'AD': AD_data_file, 'PD': PD_data_file, 'SCZ': SCZ_data_file, 'MDD': MDD_data_file}
-datasets = {'AD': SEAAD_data, 'PD': PD_data, 'SCZ': SCZ_data, 'MDD': MDD_data}
+datasets = {'AD': data, 'PD': PD_data, 'SCZ': SCZ_data, 'MDD': MDD_data}
 covariate_columns = {
     'AD': ['Age at death', 'sex', 'APOE4 status', 'Metadata: PMI'], 
     'PD': ['organ__ontology_label', 'sex', 'Donor_Age', 'Donor_PMI'],
@@ -359,42 +405,14 @@ print_dataset_sizes('After filtering to cells with <5% mitochondrial reads',
                     datasets)
 # {'AD': (1378207, 36517), 'PD': (376235, 41625), 'SCZ': (444796, 17658), 'MDD': (156911, 36588)}
 
-################################################################################
-# Aggregate to pseudobulk and save
-################################################################################
 
-def pseudobulk(dataset, ID_column, cell_type_column):
-    # Fill with 0s to avoid auto-conversion to float when filling with NaNs;
-    # skip groups where any of the columns is NaN
-    groupby = [ID_column, cell_type_column]
-    grouped = dataset.obs.groupby(groupby, observed=True, sort=False)
-    pseudobulk = pd.DataFrame(
-        0, index=pd.MultiIndex.from_tuples(grouped.indices),
-        columns=dataset.var_names, dtype=dataset.X.dtype)
-    for group, group_indices in grouped.indices.items():
-        group_counts = dataset[group_indices].X
-        pseudobulk.loc[group] = group_counts.sum(axis=0).A1
-    # Take all columns of obs that have a unique value for each group;
-    # reorder obs to match counts
-    obs = grouped.first().loc[pseudobulk.index, grouped.nunique().le(1).all()]
-    # Add number of cells as a covariate
-    obs['num_cells'] = dataset.obs.groupby(groupby).size()
-    # Reset index because h5ad can't store multi-indexes, but add all columns in
-    # groupby joined with "_" as an index
-    obs = obs\
-        .reset_index()\
-        .pipe(lambda df: df.set_axis(df[groupby].astype(str)
-                                     .apply('_'.join, axis=1)))
-    # Construct AnnData object
-    pseudobulk = ad.AnnData(pseudobulk.values, obs=obs, var=dataset.var,
-                            dtype=dataset.X.dtype)
-    return pseudobulk
+
+
 
 pseudobulks = {}
 for dataset_name, dataset in datasets.items():
     data_directory = data_files[dataset_name].split("/")[0]
     pseudobulk_file = f'pseudobulk/{data_directory}-pseudobulk.h5ad'
-    cell_type_counts_file = f'pseudobulk/{data_directory}-cell-counts.tsv'
     # if os.path.exists(pseudobulk_file): continue
     with Timer(f'[{dataset_name}] Pseudobulking'):
          pseudobulks[dataset_name] = pseudobulk(
@@ -402,16 +420,6 @@ for dataset_name, dataset in datasets.items():
     with Timer(f'[{dataset_name}] Saving pseudobulk'):
         # noinspection PyTypeChecker
         pseudobulks[dataset_name].write(pseudobulk_file)
-    # with Timer(f'[{dataset_name}] Saving cell-type counts'):
-    #     cell_type_counts = dataset.obs\
-    #         .groupby([cell_type_column[dataset_name],
-    #                   fine_cell_type_column[dataset_name]],
-    #                  observed=True, sort=False)\
-    #         [ID_column[dataset_name]]\
-    #         .value_counts()\
-    #         .unstack()\
-    #         .pipe(lambda df: df.loc[:, df.sum() > 0])
-    #     cell_type_counts.to_csv(cell_type_counts_file, sep='\t')
 
 print_dataset_sizes('After pseudobulking', pseudobulks)
 # {'AD': (709, 36517), 'PD': (144, 41625), 'SCZ': (1052, 17658)}
