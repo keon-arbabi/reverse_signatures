@@ -48,7 +48,7 @@ def pseudobulk(dataset, ID_column, cell_type_column):
 ################################################################################
 
 # select either DLPFC or MTG
-region = 'DLPFC'
+region = 'MTG'
 
 data_file = f'single-cell/SEAAD/{region}/SEAAD-{region}.h5ad'
 if os.path.exists(data_file):
@@ -110,6 +110,7 @@ else:
         data = ad.AnnData(X=X, obs=obs, var=var, dtype=X.dtype)
         
         print(f'[SEAAD {region}] Joining with external metadata...')
+        pseudo_progression_scores = pd.read_csv('single-cell/SEAAD/pseudoprogression_scores_meta.csv')
         metadata = pd.read_excel('single-cell/SEAAD/sea-ad_cohort_donor_metadata.xlsx')\
             .drop(['CERAD score','LATE','APOE4 Status','Cognitive Status',
                 'Overall AD neuropathological Change','Highest Lewy Body Disease',
@@ -121,10 +122,11 @@ else:
                 df.Class == 'Neuronal: Glutamatergic', 'Excitatory', np.where(
                 df.Class == 'Neuronal: GABAergic', 'Inhibitory', np.nan))))\
             .reset_index()\
+            .merge(pseudo_progression_scores, on = 'donor_id', how='left')\
             .merge(metadata, left_on='donor_id', right_on='Donor ID', how='left')\
+            .drop('Donor ID', axis=1)\
             .loc[:, lambda df: ~df.columns.str.contains('choice')]\
             .set_index('exp_component_name')\
-            .drop('Donor ID', axis=1)\
             .assign(**{
                     'Cognitive status': lambda df: df['Cognitive status'].astype(str)
                         .map({'Reference': 0, 'No dementia': 1, 'Dementia': 2})
@@ -179,9 +181,8 @@ else:
         print(f'[SEAAD {region}] Saving...')
         data.write(data_file)
         
-with Timer(f'[SEAAD {region}] Pseudobulking'):
+with Timer(f'[SEAAD {region}] Pseudobulking and saving'):
         pseudobulk = pseudobulk(data, 'donor_id', 'broad_cell_type')
-with Timer(f'[SEAAD {region}] Saving pseudobulk'):
         pseudobulk.write(f'pseudobulk/SEAAD-{region}-broad.h5ad')
 
 ################################################################################
