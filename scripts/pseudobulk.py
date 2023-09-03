@@ -12,39 +12,57 @@ os.chdir('/home/s/shreejoy/karbabi/projects/reverse_signatures/data')
 # Aggregate to pseudobulk and save
 ################################################################################
 
-def pseudobulk(dataset, ID_column, cell_type_column):
-    # fill with 0s to avoid auto-conversion to float when filling with NaNs;
-    # skip groups where any of the columns is NaN
-    groupby = [ID_column, cell_type_column]
-    grouped = dataset.obs.groupby(groupby, observed=True, sort=False)
+def get_pseudobulk(adata, ID_column, cell_type_column, return_anndata=False):
+    """
+    Calculates the pseudobulk matrix from an AnnData object, given a sample ID
+    and cell type column. You can run this function multiple times at different
+    cell type resolutions by setting a different cell_type_column each time.
+    
+    Args:
+        adata: an AnnData object
+        ID_column: the sample ID column in adata.obs
+        cell_type_column: the cell type column in adata.obs
+        return_anndata: if True, return an AnnData object instead of a pandas 
+                        DataFrame
+
+    Returns:
+        A pandas DataFrame, or AnnData object if return_anndata=True, of
+        pseudobulks with one row per person/cell-type pair and one column per
+        gene. If return_anndata is False, the index of the returned DataFrame
+        is a MultiIndex with three levels: cell_type_column, ID_column, and 
+        num_cells (the number of cells that went into the pseudobulk matrix 
+        for that person and cell type). If return_anndata is True, the .obs 
+        of the returned AnnData object has cell_type_column, ID_column, and 
+        num_cells as its first three columns, followed by whichever of the 
+        columns of adata.obs have a unique value for every group (i.e. person-
+        rather than cell-level metadata); the .var is the same as adata.var.
+    """
+    import pandas as pd
+    # Use observed=True to skip groups where any of the columns is NaN
+    grouped = adata.obs.groupby([cell_type_column, ID_column], observed=True)
+    # Fill with 0s to avoid auto-conversion to float when filling with NaNs
     pseudobulk = pd.DataFrame(
-        0, index=pd.MultiIndex.from_tuples(grouped.indices),
-        columns=dataset.var_names, dtype=dataset.X.dtype)
-    for group, group_indices in grouped.indices.items():
-        group_counts = dataset[group_indices].X
-        pseudobulk.loc[group] = group_counts.sum(axis=0).A1
-    # take all columns of obs that have a unique value for each group;
-    # reorder obs to match counts
-    obs = grouped.first().loc[pseudobulk.index, grouped.nunique().le(1).all()]
-    # add number of cells as a covariate
-    obs['num_cells'] = dataset.obs.groupby(groupby).size()
-    # reset index because h5ad can't store multi-indexes, but add all columns in
-    # groupby joined with "_" as an index
-    obs = obs\
-        .reset_index()\
-        .pipe(lambda df: df.set_axis(df[groupby].astype(str)
-                                     .apply('_'.join, axis=1)))
-    # Construct AnnData object
-    pseudobulk = ad.AnnData(pseudobulk.values, obs=obs, var=dataset.var,
-                            dtype=dataset.X.dtype)
+        0, index=pd.MultiIndex.from_frame(
+            grouped.size().rename('num_cells').reset_index()),
+        columns=adata.var_names, dtype=adata.X.dtype)
+    for row_index, group_indices in enumerate(grouped.indices.values()):
+        group_counts = adata[group_indices].X
+        pseudobulk.values[row_index] = group_counts.sum(axis=0).A1
+    # If return_anndata=True, convert to AnnData
+    if return_anndata:
+        obs = pd.concat([pseudobulk.index.to_frame(index=False),
+                         grouped.first().loc[:, grouped.nunique().le(1).all()]
+                         .reset_index(drop=True)], axis=1)\
+        .set_index(ID_column)
+        pseudobulk = ad.AnnData(pseudobulk.values, obs=obs, var=adata.var,
+                                dtype=adata.X.dtype)
     return pseudobulk
 
 ################################################################################
-# Load Alzheimer's data
+# Load SEAAD Alzheimer's data
 # Documentation: https://portal.brain-map.org/explore/seattle-alzheimers-disease/seattle-alzheimers-disease-brain-cell-atlas-download
 # Data: https://cellxgene.cziscience.com/collections/1ca90a2d-2943-483d-b678-b809bf464c30
-# Metadata columns: brainmapportal-live-4cc80a57cd6e400d854-f7fdcae.divio-media.net/filer_public/b0/a8/b0a81899-7241-4814-8c1f-4a324db51b0b/
-# sea-ad_donorindex_dataelementbriefdescriptions.pdf
+# Metadata columns: brainmapportal-live-4cc80a57cd6e400d854-f7fdcae.divio-media.net/filer_public/b0/a8/b0a81899-7241-4814-8c1f-4a324db51b0b/sea-ad_donorindex_dataelementbriefdescriptions.pdf
 ################################################################################
 
 # select either DLPFC or MTG
@@ -67,7 +85,8 @@ else:
             print(f'[SEAAD {region}] Loading {cell_type}...')
             data_per_cell_type[cell_type] = sc.read(f'single-cell/SEAAD/{region}/{cell_type}.h5ad')
             # check that there is no file name mismatch
-            assert all(data_per_cell_type[cell_type].obs['Subclass'].str.replace('/', '').str.replace(' ', '_') == cell_type),\
+            assert all(data_per_cell_type[cell_type].obs['Subclass'].str.replace('/', '')\
+                       .str.replace(' ', '_') == cell_type),\
                         f"Mismatch detected in {cell_type}"
             counts = data_per_cell_type[cell_type].raw.X
             del data_per_cell_type[cell_type].raw
@@ -100,6 +119,7 @@ else:
             gc.collect()
         # combine across cell types 
         print(f'[SEAAD {region}] Merging...')
+        from scipy.sparse import vstack
         X = vstack([data_per_cell_type[cell_type].X
                     for cell_type in cell_types])
         obs = pd.concat([data_per_cell_type[cell_type].obs
@@ -127,42 +147,31 @@ else:
             .drop('Donor ID', axis=1)\
             .loc[:, lambda df: ~df.columns.str.contains('choice')]\
             .set_index('exp_component_name')\
-            .assign(**{
-                    'Cognitive status': lambda df: df['Cognitive status'].astype(str)
-                        .map({'Reference': 0, 'No dementia': 1, 'Dementia': 2})
-                        .astype('int32'),
-                    'ADNC': lambda df: df['ADNC'].astype(str)
-                        .map({'Reference': 0, 'Not AD': 1, 'Low': 2, 'Intermediate': 3, 'High': 4})
-                        .astype('Int32'),
-                    'Braak stage': lambda df: df['Braak stage'].astype(str)
-                        .map({'Reference': 0, 'Braak 0': 1, 'Braak II': 2, 'Braak III': 3, 
-                            'Braak IV': 4, 'Braak V': 5, 'Braak VI': 6})
-                        .astype('Int32'),
-                    'Thal phase': lambda df: df['Thal phase'].astype(str)
-                        .map({'Reference': 0, 'Thal 0': 1, 'Thal 1': 2, 'Thal 2': 3, 'Thal 3': 4, 
-                            'Thal 4': 5, 'Thal 5': 6})
-                        .astype('Int32'),
-                    'CERAD score': lambda df: df['CERAD score']
-                        .map({'Reference': 0, 'Absent': 1, 'Sparse': 2, 'Moderate': 3, 'Frequent': 4})
-                        .astype('Int32'),
-                    'LATE-NC stage': lambda df: df['LATE-NC stage'].astype(str)
-                        .map({'Staging Precluded by FTLD with TDP43 or ALS/MND or TDP-43 pathology is unclassifiable': 0,
-                            'Reference': 0, 'Not Identified': 1,'LATE Stage 1': 2, 'LATE Stage 2': 3, 'LATE Stage 3': 4})
-                        .astype('Int32'),  
-                    'Atherosclerosis': lambda df: df['Atherosclerosis'].astype(str)
-                        .map({'Mild': 1, 'Moderate': 2, 'Severe': 2})
-                        .astype('Int32'),  
-                    'Arteriolosclerosis': lambda df: df['Arteriolosclerosis'].astype(str)
-                        .map({'Mild': 1, 'Moderate': 2, 'Severe': 2})
-                        .astype('Int32'),  
-                    'PMI': lambda df: df['PMI'].fillna(df['PMI'].median())
-                        .astype(float),
-                    'Fresh Brain Weight': lambda df: df['Fresh Brain Weight']
+            .astype({col: pd.CategoricalDtype(levels, ordered=True) 
+                     for col, levels in {
+                        'Cognitive status': ['Reference', 'No dementia', 'Dementia'],
+                        'ADNC': ['Reference', 'Not AD', 'Low', 'Intermediate', 'High'],
+                        'Braak stage': ['Reference', 'Braak 0', 'Braak II', 'Braak III', 
+                                        'Braak IV', 'Braak V', 'Braak VI'],
+                        'Thal phase': ['Reference', 'Thal 0', 'Thal 1', 'Thal 2', 'Thal 3',
+                                       'Thal 4', 'Thal 5'],
+                        'CERAD score': ['Reference', 'Absent', 'Sparse', 'Moderate', 'Frequent'],
+                        'LATE-NC stage': ['Staging Precluded by FTLD with TDP43 or ALS/MND or TDP-43 pathology is unclassifiable',
+                                          'Reference', 'Not Identified','LATE Stage 1', 'LATE Stage 2', 'LATE Stage 3'],
+                        'Atherosclerosis': ['Mild', 'Moderate', 'Severe'],
+                        'Arteriolosclerosis': ['Mild', 'Moderate', 'Severe']}.items()})\
+                 .assign(**{
+                     'PMI': lambda df: df['PMI'].fillna(df['PMI'].median())\
+                         .astype(float),
+                     'Fresh Brain Weight': lambda df: df['Fresh Brain Weight']
                         .replace({'Unavailable': pd.NA})
                         .astype('Int64'),
-                    'APOE4 status': lambda df: df['APOE4 status'].eq('Y'),
-                    'Neurotypical reference': lambda df: df['Neurotypical reference'].eq('True'),
-                    'ACT': lambda df: df['Primary Study Name'].eq('ACT'),
+                    'APOE4 status': lambda df: df['APOE4 status']\
+                        .eq('Y'),
+                    'Neurotypical reference': lambda df: df['Neurotypical reference']\
+                        .eq('True'),
+                    'ACT': lambda df: df['Primary Study Name']\
+                        .eq('ACT'),
                     'ADRC Clinical Core': lambda df: df['Primary Study Name'].eq('ADRC Clinical Core')})\
             .assign(**{key: lambda df, key=key: pd.to_numeric(df[key].replace('90+', '90')).astype('Int64')
                     for key in ('Age at Death','Age of onset cognitive symptoms','Age of Dementia diagnosis')})\
@@ -175,15 +184,93 @@ else:
                 'Thal phase': 'category', 'Total Microinfarcts (not observed grossly)': 'Int32', 
                 'Total microinfarcts in screening sections': 'Int32', 'Years of education': 'Int32', 
                 'assay': 'category', 'broad_cell_type': 'category', 'cell_type': 'category', 'disease': 'category', 
-                'self_reported_ethnicity': 'category', 'tissue': 'category'})\
-            .pipe(lambda df: df.assign(**{col + '_num': df.groupby('donor_id')['Subclass']
-                                        .transform(lambda x: (x == col).sum()) for col in df['Subclass'].unique()}))
+                'self_reported_ethnicity': 'category', 'tissue': 'category', 
+                'Arteriolosclerosis': 'category', 'Atherosclerosis': 'category'})\
+            .pipe(lambda df: pd.concat([df, pd.get_dummies(df['Subclass']).groupby(df['donor_id']).transform('sum')], axis=1))
+            
         print(f'[SEAAD {region}] Saving...')
         data.write(data_file)
         
-with Timer(f'[SEAAD {region}] Pseudobulking and saving'):
-        pseudobulk = pseudobulk(data, 'donor_id', 'broad_cell_type')
-        pseudobulk.write(f'pseudobulk/SEAAD-{region}-broad.h5ad')
+        
+
+if not os.path.exists(f'pseudobulk/SEAAD-{region}-broad.h5ad'):
+    with Timer(f'[SEAAD {region}] Pseudobulking and saving'):
+            pseudobulk = get_pseudobulk(data, 'donor_id', 'broad_cell_type', return_anndata=True)
+            pseudobulk_out.write(f'pseudobulk/SEAAD-{region}-broad.h5ad')
+
+################################################################################
+# Load p400 Alzheimer's data
+# Documentation and data: https://www.synapse.org/#!Synapse:syn23650894
+# Provided by Vilas Menon
+################################################################################
+
+with Timer('Loading AD data'):
+    data = sc.read('single-cell/p400/p400_qced_shareable.h5ad')
+    tmp = data.obs\
+        .assign(broad_cell_type=lambda df: df.subset
+            .replace({
+                'CUX2+': 'Excitatory',
+                'Astorcytes': 'Astrocyte',
+                'Microglia': 'Microglia-PVM',
+                'Oligodendrocytes': 'Oligodendrocyte'}))\
+            
+        
+
+# Check that all duplicate projids have the same metadata
+assert not any(pd.read_csv('pseudobulk/dataset_978_basic_04-21-2023_ordered.csv')\
+                   [lambda meta: meta.duplicated('projid', keep=False)]\
+                   .groupby('projid')\
+                   .apply(lambda x: x.nunique() > 1)\
+                   .sum(axis=1) > 0)
+
+obs = pd.read_csv('pseudobulk/dataset_978_basic_04-21-2023.csv')\
+    .drop_duplicates(subset='projid')\
+    .set_index('projid')\
+    .apply(lambda col: col.replace({' ': pd.NA, 'NA': pd.NA, '<NA>': pd.NA, 'nan': pd.NA}))\
+    .dropna(axis=1, how='all')\
+    .astype({
+        'study': 'category', 'scaled_to': 'category', 
+        'apoe_genotype': 'category', 'amyloid': 'float', 'plaq_d': 'float', 
+        'plaq_n': 'float', 'braaksc': 'category', 'ceradsc': 'category', 
+        'gpath': 'float', 'niareagansc': 'category', 'tangles': 'float', 
+        'nft': 'float', 'cogdx': 'category', 'age_bl': 'float', 
+        'age_death': 'float', 'pmi': 'float', 'msex': 'bool', 'race7': 'category', 
+        'educ': 'int32', 'spanish': 'object', 
+        'ldai_bl': 'category', 'smoking': 'category', 'cancer_bl': 'category', 
+        'headinjrloc_bl': 'category', 'thyroid_bl': 'category', 
+        'agreeableness': 'category', 'conscientiousness': 'category', 
+        'extraversion_6': 'category', 'neuroticism_12': 'category', 
+        'openness': 'category', 'chd_cogact_freq': 'category', 
+        'lifetime_cogact_freq_bl': 'float', 'ma_adult_cogact_freq': 'category', 
+        'ya_adult_cogact_freq': 'category', 'hspath_typ': 'category', 
+        'dlbdx': 'category', 'arteriol_scler': 'category', 'caa_4gp': 'category', 
+        'cvda_4gp2': 'category', 'ci_num2_gct': 'category', 
+        'ci_num2_mct': 'category', 'emotional_neglect': 'category', 
+        'family_pro_sep': 'category', 'financial_need': 'category', 
+        'parental_intimidation': 'category', 'parental_violence': 'category', 
+        'tot_adverse_exp': 'category', 'angerin': 'category', 
+        'angerout': 'category', 'angertrait': 'category', 
+        'disord_regiment': 'category', 'explor_rigid': 'category', 
+        'extrav_reserv': 'category', 'haanticipatoryworry': 'category', 
+        'hafatigability': 'category', 'hafearuncetainty': 'category', 
+        'harmavoidance': 'category', 'hashyness': 'category', 
+        'impul_reflect': 'category', 'nov_seek': 'category', 
+        'tomm40_hap': 'category', 'age_first_ad_dx': 'float', 
+        'marital_now_bl': 'category', 'agefirst': 'category', 
+        'agelast': 'category', 'menoage': 'category', 'mensage': 'category', 
+        'natura': 'category', 'othspe00': 'category', 'whatwas': 'category', 
+        'med_con_sum_bl': 'category', 'ad_reagan': 'category', 
+        'mglia123_caud_vm': 'float', 'mglia123_it': 'float', 
+        'mglia123_mf': 'float', 'mglia123_put_p': 'float', 
+        'mglia23_caud_vm': 'category', 'mglia23_it': 'float', 
+        'mglia23_mf': 'float', 'mglia23_put_p': 'float', 
+        'mglia3_caud_vm': 'category', 'mglia3_it': 'category', 
+        'mglia3_mf': 'category', 'mglia3_put_p': 'category', 'tdp_st4': 'category', 
+        'cog_res_age12': 'category', 'cog_res_age40': 'category', 
+        'tot_cog_res': 'category', 'early_hh_ses': 'float', 
+        'income_bl': 'category', 'ladder_composite': 'category', 
+        'mateduc': 'category', 'pareduc': 'category', 'pateduc': 'category', 
+        'q40inc': 'category'})
 
 ################################################################################
 # Load Parkinson's data (10 PD/LBD individuals and 8 neurotypical controls)

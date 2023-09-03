@@ -1,5 +1,5 @@
 import matplotlib.pyplot as plt, numpy as np, os, sys, \
-    pandas as pd, scanpy as sc, seaborn as sns
+    pandas as pd, scanpy as sc, seaborn as sns, optuna
 from rpy2.robjects import r
 from scipy.stats import sem
 
@@ -16,13 +16,15 @@ study_names = 'Maitra', 'Macosko'
 
 # temp 
 cell_type = 'Excitatory'
-study_name = 'SEAAD'
+study_name = 'SEAAD-MTG'
+
+save_trial = {}
 
 for study_name in study_names:
     for cell_type in broad_cell_types:
         
         # load pseudobulks 
-        adata = sc.read(f'data/pseudobulk/{study_name}-pseudobulk.h5ad')
+        adata = sc.read(f'data/pseudobulk/{study_name}-broad.h5ad')
         adata = adata[adata.obs['broad_cell_type'] == cell_type, :]
 
         # subset to the 2000 most highly variable genes 
@@ -30,7 +32,7 @@ for study_name in study_names:
         adata = adata[:, hvg].copy()
         
         # convert to log CPMs
-        np.log1p(adata.X * (1000000 / adata.X.sum(axis=1))[:, None], out=adata.X)
+        adata.X = np.log1p(adata.X * (1000000 / adata.X.sum(axis=1))[:, None])
         adata.X *= 1 / np.log(2)
 
         # convert to R
@@ -40,31 +42,72 @@ for study_name in study_names:
         gene_names = adata.var_names
         samp_names = adata.obs_names    
 
-        # run NMF with RcppML, selecting k via 3-fold cross-validation (3 is default):
-        # - biorxiv.org/content/10.1101/2021.09.01.458620v1.full
-        # - github.com/zdebruine/RcppML/blob/main/R/nmf.R
-        # - Install via devtools::install_github('zdebruine/RcppML')
-        # - Use L1=0.01: github.com/zdebruine/singlet/blob/main/R/cross_validate_nmf.R
+        # Use Optuna to select best k, L1_w and L1_h:
+        # github.com/optuna/optunadl.acm.org/doi/10.1145/3292500.3330701
+        # Hyperparameter optimization mini-review: medium.com/criteo-engineering/
+        # hyper-parameter-optimization-algorithms-2fe447525903
+        #
+        # Use multivariate, rather than independent, TPE:
+        # tech.preferred.jp/en/blog/multivariate-tpe-makes-optuna-even-more-powerful
+        # But don't need to set group=True, that's just if you have an if-else statement
+        # in the objective function: github.com/optuna/optuna/releases/tag/v2.8.0
+        #
+        # Make a scatterplot of total NMF runtime (hyperparameter optimization + final
+        # trial) vs # cells, across cell types
 
-        kmin, kmax = 1, 15 # IMPORTANT: INCREASE KMAX IF BEST MSE IS CLOSE TO KMAX!!!
-        r.options(**{'RcppML.verbose': True})
-        MSE = r.crossValidate(log_CPMs_R, k=r.c(*range(kmin, kmax + 1)), seed=0, reps=3, L1=r.c(0.01, 0.01))
-        MSE = rdf_to_df(MSE)\
-            .astype({'k': int, 'rep': int})\
-            .set_index(['k', 'rep'])\
-            .squeeze()\
-            .rename('MSE')
+        def objective(trial):
         
-        # choose the smallest k that has a mean MSE (across the three folds) within 1
-        # standard error of the k with the lowest mean MSE (similar to glmnet's
-        # lambda.1se), where the SE is taken across the three folds at the best k
-        # - Motivation for the 1 SE rule: stats.stackexchange.com/a/138573
-        # - glmnet code: github.com/cran/glmnet/blob/master/R/getOptcv.glmnet.R
+            L1_w = trial.suggest_float('L1_w', 0.001, 0.1, log=True)
+            L1_h = trial.suggest_float('L1_h', 0.001, 0.1, log=True)
 
-        mean_MSE = MSE.groupby('k').mean()
-        k_best = int(mean_MSE.idxmin())
-        k_1se = int(mean_MSE.index[mean_MSE <= mean_MSE[k_best] + sem(MSE[k_best])][0])
+            L2_w = trial.suggest_float('L2_w', 0.001, 0.1, log=True)
+            L2_h = trial.suggest_float('L2_h', 0.001, 0.1, log=True)
+
+            # run NMF with RcppML, selecting k via 3-fold cross-validation (3 is default):
+            # - biorxiv.org/content/10.1101/2021.09.01.458620v1.full
+            # - github.com/zdebruine/RcppML/blob/main/R/nmf.R
+            # - Install via devtools::install_github('zdebruine/RcppML')
+            # - Use L1=0.01: github.com/zdebruine/singlet/blob/main/R/cross_validate_nmf.R
+
+            kmin, kmax = 1, 15 # IMPORTANT: INCREASE KMAX IF BEST MSE IS CLOSE TO KMAX!!!
+            r.options(**{'RcppML.verbose': True})
+            MSE = r.crossValidate(log_CPMs_R, k=r.c(*range(kmin, kmax + 1)), seed=0, reps=3, 
+                                  L1=r.c(L1_w, L1_h), L2=r.c(L2_w, L2_h), tol=1e-4,
+                                  maxit=np.iinfo('int32').max)
+            MSE = rdf_to_df(MSE)\
+                .astype({'k': int, 'rep': int})\
+                .set_index(['k', 'rep'])\
+                .squeeze()\
+                .rename('MSE')
+            
+            # choose the smallest k that has a mean MSE (across the three folds) within 1
+            # standard error of the k with the lowest mean MSE (similar to glmnet's
+            # lambda.1se), where the SE is taken across the three folds at the best k
+            # - Motivation for the 1 SE rule: stats.stackexchange.com/a/138573
+            # - glmnet code: github.com/cran/glmnet/blob/master/R/getOptcv.glmnet.R
+
+            mean_MSE = MSE.groupby('k').mean()
+            k_best = int(mean_MSE.idxmin())
+            k_1se = int(mean_MSE.index[mean_MSE <= mean_MSE[k_best] + sem(MSE[k_best])][0])
+            print(f'{study_name}-{cell_type}: {k_best=}, {k_1se=}')
+            error = mean_MSE[k_1se]
+            save_trial[study_name, cell_type, L1_w, L1_h, L2_w, L2_h] = MSE
+            return error
+
+
+
+
+        study = optuna.create_study(sampler=optuna.samplers.TPESampler(seed=0, multivariate=True))
+        study.optimize(objective, n_trials=100)
+        L1_w, L1_h, L2_w, L2_h = study.best_trial.params.values()
+
+        MSE = save_trial[study_name, cell_type, L1_w, L1_h, L2_w, L2_h] 
+        min_MSE = MSE.groupby('k').min()
+        k_best = int(min_MSE.idxmin())
+        k_1se = int(min_MSE.index[min_MSE <= min_MSE[k_best] + sem(MSE[k_best])][0])
         print(f'{study_name}-{cell_type}: {k_best=}, {k_1se=}')
+
+        NMF_results = r.nmf(log_CPMs_R, k=k_1se, L1=r.c(L1_w, L1_h), tol=1e-5, seed=0)
 
         # save MSE results 
         os.makedirs('results/MSE', exist_ok=True)
