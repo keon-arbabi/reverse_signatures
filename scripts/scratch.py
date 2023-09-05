@@ -2,18 +2,26 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import pandas as pd
 
-df =  data.obs[data.obs['broad_cell_type'] == 'Oligodendrocyte'].drop_duplicates(subset='donor_id')
-categories = ['cognitive_status', 'adnc', 'braak_stage', 'thal_phase', 'cerad_score', 'late_nc_stage']
+tmp = sc.read('pseudobulk/SEAAD-DLPFC-broad.h5ad')
+df = tmp.obs[tmp.obs['broad_cell_type'] == 'Oligodendrocyte']
+categories = ['Cognitive status', 'ADNC', 'Braak stage', 'Thal phase', 'CERAD score', 'LATE-NC stage']
 
 # Reshape the DataFrame to long format
-df_melted = df.melt(id_vars='Oligodendrocyte_num', value_vars=categories)
-df_melted['value'] = df_melted['value'].astype(str)
+df_melted = df.melt(id_vars='Oligodendrocyte_num', value_vars=categories).drop_
 
-# Plot
-plt.figure(figsize=(15, 6))
-sns.boxplot(x='variable', y='Oligodendrocyte_num', hue='value', data=df_melted, palette="Set2")
-sns.stripplot(x='variable', y='Oligodendrocyte_num', hue='value', data=df_melted, jitter=True, 
-              dodge=True, marker='o', alpha=0.7, edgecolor='black', linewidth=0.5, palette="Set2")
-plt.gca().legend().set_visible(False)
+# Create separate boxplots for each category
+fig, axes = plt.subplots(nrows=1, ncols=len(['Cognitive status', 'ADNC', 'Braak stage', 'Thal phase', 'CERAD score', 'LATE-NC stage']), figsize=(20, 5))
 
-plt.savefig("boxplot_with_points.png")
+for i, cat in enumerate(['Cognitive status', 'ADNC', 'Braak stage', 'Thal phase', 'CERAD score', 'LATE-NC stage']):
+    order = df[cat].cat.categories if hasattr(df[cat], 'cat') else None
+    sns.boxplot(x=cat, y='Oligodendrocyte_num', data=df, ax=axes[i], order=order, palette="Set3")
+    sns.swarmplot(x=cat, y='Oligodendrocyte_num', data=df, color='black', ax=axes[i], size=2.5, order=order)
+    
+    axes[i].set_title(cat)
+    axes[i].set_xticklabels(axes[i].get_xticklabels(), rotation=45, ha='right')
+    axes[i].grid(False)
+plt.suptitle('SEAAD MTG')
+plt.tight_layout()
+plt.subplots_adjust(wspace=0.5) 
+plt.savefig("georgie_SEAAD_MTG_plots.png", dpi=300)
+

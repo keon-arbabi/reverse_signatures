@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt, numpy as np, os, sys, \
 from rpy2.robjects import r
 from scipy.stats import sem
 
-sys.path.append('/home/s/shreejoy/karbabi/projects/reverse_signatures/scripts')
+sys.path.append(os.path.expanduser('~wainberg'))
 from utils import array_to_rmatrix, highly_variable_genes, rdf_to_df, rmatrix_to_df, savefig
     
 r.library('RcppML')
@@ -18,7 +18,8 @@ study_names = 'Maitra', 'Macosko'
 cell_type = 'Excitatory'
 study_name = 'SEAAD-MTG'
 
-save_trial = {}
+trial_MSE = {}
+trial_k_1se = {}
 
 for study_name in study_names:
     for cell_type in broad_cell_types:
@@ -31,6 +32,22 @@ for study_name in study_names:
         hvg = highly_variable_genes(adata).highly_variable
         adata = adata[:, hvg].copy()
         
+        # # subset to case-control differentially expressed genes 
+        # degs = pd.read_csv('/home/s/shreejoy/karbabi/projects/reverse_signatures/data/DE/de_aspan_voombygroup_p400.tsv', sep='\t')\
+        #     .assign(broad_cell_type=lambda df: df.cell_type
+        #             .replace({'Astro':'Astrocyte',
+        #                       'Endo':'Endothelial',
+        #                       'Glut':'Excitatory',
+        #                       'GABA':'Inhibitory',
+        #                       'Micro':'Microglia-PVM',
+        #                       'Oligo':'Oligodendrocyte',
+        #                       'OPC':'OPC'}))\
+        #     .query(f'broad_cell_type == "{cell_type}" & ids == "allids" & study == "p400"')\
+        #     .sort_values('fdr')\
+        #     .head(1000)
+        # degs = degs['gene'].astype(str).tolist()   
+        # adata = adata[:, adata.var_names.isin(degs)].copy()
+        
         # convert to log CPMs
         adata.X = np.log1p(adata.X * (1000000 / adata.X.sum(axis=1))[:, None])
         adata.X *= 1 / np.log(2)
@@ -42,38 +59,33 @@ for study_name in study_names:
         gene_names = adata.var_names
         samp_names = adata.obs_names    
 
-        # Use Optuna to select best k, L1_w and L1_h:
-        # github.com/optuna/optunadl.acm.org/doi/10.1145/3292500.3330701
-        # Hyperparameter optimization mini-review: medium.com/criteo-engineering/
-        # hyper-parameter-optimization-algorithms-2fe447525903
+        # use optuna to select best k, and L1 and L2 for W and H:
+        # https://github.com/optuna/optunadl.acm.org/doi/10.1145/3292500.3330701
+        # Hyperparameter optimization mini-review:
+        # https://medium.com/criteo-engineering/hyper-parameter-optimization-algorithms-2fe447525903
         #
-        # Use multivariate, rather than independent, TPE:
-        # tech.preferred.jp/en/blog/multivariate-tpe-makes-optuna-even-more-powerful
-        # But don't need to set group=True, that's just if you have an if-else statement
-        # in the objective function: github.com/optuna/optuna/releases/tag/v2.8.0
-        #
-        # Make a scatterplot of total NMF runtime (hyperparameter optimization + final
-        # trial) vs # cells, across cell types
+        # use multivariate, rather than independent, TPE:
+        # https://tech.preferred.jp/en/blog/multivariate-tpe-makes-optuna-even-more-powerful
+        # but don't need to set group=True, that's just if you have an if-else statement
+        # in the objective function: https://github.com/optuna/optuna/releases/tag/v2.8.0
 
         def objective(trial):
         
             L1_w = trial.suggest_float('L1_w', 0.001, 0.1, log=True)
             L1_h = trial.suggest_float('L1_h', 0.001, 0.1, log=True)
-
             L2_w = trial.suggest_float('L2_w', 0.001, 0.1, log=True)
             L2_h = trial.suggest_float('L2_h', 0.001, 0.1, log=True)
 
             # run NMF with RcppML, selecting k via 3-fold cross-validation (3 is default):
-            # - biorxiv.org/content/10.1101/2021.09.01.458620v1.full
-            # - github.com/zdebruine/RcppML/blob/main/R/nmf.R
+            # - https://biorxiv.org/content/10.1101/2021.09.01.458620v1.full
+            # - https://github.com/zdebruine/RcppML/blob/main/R/nmf.R
             # - Install via devtools::install_github('zdebruine/RcppML')
-            # - Use L1=0.01: github.com/zdebruine/singlet/blob/main/R/cross_validate_nmf.R
 
             kmin, kmax = 1, 15 # IMPORTANT: INCREASE KMAX IF BEST MSE IS CLOSE TO KMAX!!!
             r.options(**{'RcppML.verbose': True})
-            MSE = r.crossValidate(log_CPMs_R, k=r.c(*range(kmin, kmax + 1)), seed=0, reps=3, 
-                                  L1=r.c(L1_w, L1_h), L2=r.c(L2_w, L2_h), tol=1e-4,
-                                  maxit=np.iinfo('int32').max)
+            MSE = r.crossValidate(log_CPMs_R, k=r.c(*range(kmin, kmax + 1)), 
+                                  L1=r.c(L1_w, L1_h), L2=r.c(L2_w, L2_h),
+                                  seed=0, reps=3, tol=1e-4, maxit=np.iinfo('int32').max)
             MSE = rdf_to_df(MSE)\
                 .astype({'k': int, 'rep': int})\
                 .set_index(['k', 'rep'])\
@@ -84,37 +96,27 @@ for study_name in study_names:
             # standard error of the k with the lowest mean MSE (similar to glmnet's
             # lambda.1se), where the SE is taken across the three folds at the best k
             # - Motivation for the 1 SE rule: stats.stackexchange.com/a/138573
-            # - glmnet code: github.com/cran/glmnet/blob/master/R/getOptcv.glmnet.R
+            # - glmnet code: https://github.com/cran/glmnet/blob/master/R/getOptcv.glmnet.R
 
             mean_MSE = MSE.groupby('k').mean()
             k_best = int(mean_MSE.idxmin())
             k_1se = int(mean_MSE.index[mean_MSE <= mean_MSE[k_best] + sem(MSE[k_best])][0])
-            print(f'{study_name}-{cell_type}: {k_best=}, {k_1se=}')
+            trial_MSE[study_name, cell_type, L1_w, L1_h, L2_w, L2_h] = MSE
+            trial_k_1se[study_name, cell_type, L1_w, L1_h, L2_w, L2_h] = k_1se
+            
             error = mean_MSE[k_1se]
-            save_trial[study_name, cell_type, L1_w, L1_h, L2_w, L2_h] = MSE
             return error
-
-
-
 
         study = optuna.create_study(sampler=optuna.samplers.TPESampler(seed=0, multivariate=True))
         study.optimize(objective, n_trials=100)
         L1_w, L1_h, L2_w, L2_h = study.best_trial.params.values()
-
-        MSE = save_trial[study_name, cell_type, L1_w, L1_h, L2_w, L2_h] 
-        min_MSE = MSE.groupby('k').min()
-        k_best = int(min_MSE.idxmin())
-        k_1se = int(min_MSE.index[min_MSE <= min_MSE[k_best] + sem(MSE[k_best])][0])
-        print(f'{study_name}-{cell_type}: {k_best=}, {k_1se=}')
-
-        NMF_results = r.nmf(log_CPMs_R, k=k_1se, L1=r.c(L1_w, L1_h), tol=1e-5, seed=0)
-
-        # save MSE results 
-        os.makedirs('results/MSE', exist_ok=True)
-        MSE.to_csv(f'results/MSE/{study_name}-{cell_type}_MSE.tsv', sep='\t')
-
-        # re-run NMF at k_1se, without cross-validation
-        NMF_results = r.nmf(log_CPMs_R, k=k_1se, seed=0, tol=1e-5, maxit=np.iinfo('int32').max, L1=r.c(0.01, 0.01))
+        
+        MSE = trial_MSE[study_name, cell_type, L1_w, L1_h, L2_w, L2_h] 
+        k_1se = trial_k_1se[study_name, cell_type, L1_w, L1_h, L2_w, L2_h]
+        
+        # run NMF with best k, L1, L2
+        NMF_results = r.nmf(log_CPMs_R, k=k_1se, L1=r.c(L1_w, L1_h), L2=r.c(L2_w, L2_h), 
+                            seed=0, reps=3, tol=1e-4, maxit=np.iinfo('int32').max)
 
         # get W and H matrices
         W = rmatrix_to_df(NMF_results.slots['w'])\
@@ -124,13 +126,16 @@ for study_name in study_names:
             .T\
             .set_axis(samp_names)\
             .rename(columns=lambda col: col.replace('nmf', 'Metagene '))
+            
+        # save MSE results 
+        os.makedirs('results/MSE', exist_ok=True)
+        MSE.to_csv(f'results/MSE/{study_name}-{cell_type}_MSE.tsv', sep='\t')
         
         # save W and H matrices, and MSE
         os.makedirs('results/NMF', exist_ok=True)
         W.to_csv(f'results/NMF/{study_name}-{cell_type}_W.tsv', sep='\t')
         H.to_csv(f'results/NMF/{study_name}-{cell_type}_H.tsv', sep='\t')
             
-
 
 for study_name in study_names:
     for cell_type in broad_cell_types:
