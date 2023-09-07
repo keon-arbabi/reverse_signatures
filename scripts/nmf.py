@@ -1,39 +1,43 @@
-import matplotlib.pyplot as plt, numpy as np, os, sys, \
-    pandas as pd, scanpy as sc, seaborn as sns, optuna
+import matplotlib.pyplot as plt, numpy as np, os, sys, warnings,\
+    pandas as pd, scanpy as sc, seaborn as sns, pingouin as pg, optuna
 from rpy2.robjects import r
 from scipy.stats import sem
-
-sys.path.append(os.path.expanduser('~wainberg'))
-from utils import array_to_rmatrix, highly_variable_genes, rdf_to_df, rmatrix_to_df, savefig
-    
+from scipy.spatial.distance import pdist
+from scipy.cluster.hierarchy import linkage
+sys.path.append('projects/reverse_signatures/scripts')
+from utils import Timer, rmatrix_to_df, array_to_rmatrix, rdf_to_df
+warnings.filterwarnings("ignore", category=FutureWarning)
 r.library('RcppML')
 os.chdir('/home/s/shreejoy/karbabi/projects/reverse_signatures')
 
 # for each cell broad cell type and study 
 broad_cell_types = 'Excitatory','Inhibitory','Oligodendrocyte','Astrocyte','Microglia-PVM','OPC','Endothelial'
-study_names = 'Maitra', 'Macosko'
-#'SZBDMulticohort', 'ROSMAP', 'SEAAD', 
+study_names = 'SEAAD-DLPFC','SEAAD-MTG'
 
-# temp 
 cell_type = 'Excitatory'
 study_name = 'SEAAD-MTG'
 
-trial_MSE = {}
-trial_k_1se = {}
+MSE_trial = {}
+k_1se_trial = {}
 
 for study_name in study_names:
-    for cell_type in broad_cell_types:
+    
+    fig, axes = plt.subplots(3, 3, figsize=(15, 15))
+    [ax.axis('off') for ax in axes.flatten()]
+    
+    for idx, cell_type in enumerate(broad_cell_types):
         
         # load pseudobulks 
         adata = sc.read(f'data/pseudobulk/{study_name}-broad.h5ad')
         adata = adata[adata.obs['broad_cell_type'] == cell_type, :]
 
         # subset to the 2000 most highly variable genes 
-        hvg = highly_variable_genes(adata).highly_variable
+        #hvg = sc.pp.highly_variable_genes(adata, n_top_genes=2000, flavor='seurat_v3', inplace=False).highly_variable
+        hvg = np.argpartition(-np.var(adata.X, axis=0), 2000)[:2000] 
         adata = adata[:, hvg].copy()
         
         # # subset to case-control differentially expressed genes 
-        # degs = pd.read_csv('/home/s/shreejoy/karbabi/projects/reverse_signatures/data/DE/de_aspan_voombygroup_p400.tsv', sep='\t')\
+        # degs = pd.read_csv('data/differential-expression/de_aspan_voombygroup_p400.tsv', sep='\t')\
         #     .assign(broad_cell_type=lambda df: df.cell_type
         #             .replace({'Astro':'Astrocyte',
         #                       'Endo':'Endothelial',
@@ -61,8 +65,6 @@ for study_name in study_names:
 
         # use optuna to select best k, and L1 and L2 for W and H:
         # https://github.com/optuna/optunadl.acm.org/doi/10.1145/3292500.3330701
-        # Hyperparameter optimization mini-review:
-        # https://medium.com/criteo-engineering/hyper-parameter-optimization-algorithms-2fe447525903
         #
         # use multivariate, rather than independent, TPE:
         # https://tech.preferred.jp/en/blog/multivariate-tpe-makes-optuna-even-more-powerful
@@ -71,21 +73,19 @@ for study_name in study_names:
 
         def objective(trial):
         
-            L1_w = trial.suggest_float('L1_w', 0.001, 0.1, log=True)
-            L1_h = trial.suggest_float('L1_h', 0.001, 0.1, log=True)
-            L2_w = trial.suggest_float('L2_w', 0.001, 0.1, log=True)
-            L2_h = trial.suggest_float('L2_h', 0.001, 0.1, log=True)
+            L1_w = trial.suggest_float('L1_w', 0.001, 0.999, log=True)
+            L1_h = trial.suggest_float('L1_h', 0.001, 0.999, log=True)
 
             # run NMF with RcppML, selecting k via 3-fold cross-validation (3 is default):
             # - https://biorxiv.org/content/10.1101/2021.09.01.458620v1.full
             # - https://github.com/zdebruine/RcppML/blob/main/R/nmf.R
             # - Install via devtools::install_github('zdebruine/RcppML')
 
-            kmin, kmax = 1, 15 # IMPORTANT: INCREASE KMAX IF BEST MSE IS CLOSE TO KMAX!!!
+            kmin, kmax = 1, 20 # IMPORTANT: INCREASE KMAX IF BEST MSE IS CLOSE TO KMAX!!!
             r.options(**{'RcppML.verbose': True})
-            MSE = r.crossValidate(log_CPMs_R, k=r.c(*range(kmin, kmax + 1)), 
-                                  L1=r.c(L1_w, L1_h), L2=r.c(L2_w, L2_h),
-                                  seed=0, reps=3, tol=1e-4, maxit=np.iinfo('int32').max)
+            MSE = r.crossValidate(log_CPMs_R, 
+                                  k=r.c(*range(kmin, kmax + 1)), L1=r.c(L1_w, L1_h), 
+                                  seed=0, reps=3, tol=1e-2, maxit=np.iinfo('int32').max)
             MSE = rdf_to_df(MSE)\
                 .astype({'k': int, 'rep': int})\
                 .set_index(['k', 'rep'])\
@@ -95,28 +95,34 @@ for study_name in study_names:
             # choose the smallest k that has a mean MSE (across the three folds) within 1
             # standard error of the k with the lowest mean MSE (similar to glmnet's
             # lambda.1se), where the SE is taken across the three folds at the best k
-            # - Motivation for the 1 SE rule: stats.stackexchange.com/a/138573
+            # - Motivation for the 1 SE rule: https://stats.stackexchange.com/a/138573
             # - glmnet code: https://github.com/cran/glmnet/blob/master/R/getOptcv.glmnet.R
 
             mean_MSE = MSE.groupby('k').mean()
             k_best = int(mean_MSE.idxmin())
             k_1se = int(mean_MSE.index[mean_MSE <= mean_MSE[k_best] + sem(MSE[k_best])][0])
-            trial_MSE[study_name, cell_type, L1_w, L1_h, L2_w, L2_h] = MSE
-            trial_k_1se[study_name, cell_type, L1_w, L1_h, L2_w, L2_h] = k_1se
+            
+            MSE_trial[study_name, cell_type, L1_w, L1_h] = MSE
+            k_1se_trial[study_name, cell_type, L1_w, L1_h] = k_1se
+            print(f'[{study_name} {cell_type}]: {k_1se=}')
             
             error = mean_MSE[k_1se]
             return error
 
-        study = optuna.create_study(sampler=optuna.samplers.TPESampler(seed=0, multivariate=True))
-        study.optimize(objective, n_trials=100)
-        L1_w, L1_h, L2_w, L2_h = study.best_trial.params.values()
+        study = optuna.create_study(sampler=optuna.samplers.TPESampler(seed=0, multivariate=True),
+                                    direction='minimize')
+        study.optimize(objective, n_trials=30)
+
+        L1_w, L1_h = study.best_trial.params.values()
         
-        MSE = trial_MSE[study_name, cell_type, L1_w, L1_h, L2_w, L2_h] 
-        k_1se = trial_k_1se[study_name, cell_type, L1_w, L1_h, L2_w, L2_h]
+        MSE_final = MSE_trial[study_name, cell_type, L1_w, L1_h]
+        k_final = k_1se_trial[study_name, cell_type, L1_w, L1_h]
+        print(f'[{study_name} {cell_type}]: {k_final=}')
         
-        # run NMF with best k, L1, L2
-        NMF_results = r.nmf(log_CPMs_R, k=k_1se, L1=r.c(L1_w, L1_h), L2=r.c(L2_w, L2_h), 
-                            seed=0, reps=3, tol=1e-4, maxit=np.iinfo('int32').max)
+        # run NMF with best k, L1_w, L1_h
+        NMF_results = r.nmf(log_CPMs_R, 
+                            k=k_final, L1=r.c(L1_w, L1_h),
+                            seed=0, tol=1e-5, maxit=np.iinfo('int32').max)
 
         # get W and H matrices
         W = rmatrix_to_df(NMF_results.slots['w'])\
@@ -129,12 +135,137 @@ for study_name in study_names:
             
         # save MSE results 
         os.makedirs('results/MSE', exist_ok=True)
-        MSE.to_csv(f'results/MSE/{study_name}-{cell_type}_MSE.tsv', sep='\t')
-        
-        # save W and H matrices, and MSE
+        MSE_final.to_csv(f'results/MSE/{study_name}-{cell_type}_MSE.tsv', sep='\t')
+        # save W and H matrices
         os.makedirs('results/NMF', exist_ok=True)
         W.to_csv(f'results/NMF/{study_name}-{cell_type}_W.tsv', sep='\t')
         H.to_csv(f'results/NMF/{study_name}-{cell_type}_H.tsv', sep='\t')
+        
+        # plot MSE and k_1se across all and best trial(s) 
+        row, col = divmod(idx, 3)
+        ax = axes[row, col]
+        for trial_n, ((current_study, current_cell_type, L1_w, L1_h), MSE) in enumerate(MSE_trial.items()):
+            if current_study != study_name or current_cell_type != cell_type:
+                continue
+            mean_MSE = MSE.groupby('k').mean()
+            k_1se = k_1se_trial[study_name, cell_type, L1_w, L1_h]
+            ax.plot(mean_MSE.index, mean_MSE.values, color='black', alpha=0.1)
+            ax.scatter(k_1se, mean_MSE[k_1se], color='black', s=16, alpha=0.1)
+        
+        mean_MSE = MSE_final.groupby('k').mean()
+        ax.plot(mean_MSE.index, mean_MSE.values, color='red')
+        ax.scatter(k_final, mean_MSE[k_final], color='red', s=50)
+        ax.set_xticks(ticks=mean_MSE.index)
+        ax.set_yscale('log')
+        ax.set_title(f'{study_name} {cell_type}, MSE across Optuna trials\nSelected L1_w and L1_h: {L1_w:.3f}, {L1_h:.3f}')
+        ax.set_xlabel('k'), ax.set_ylabel('Mean MSE')
+        ax.axis('on')  
+
+        plt.tight_layout()
+        plt.savefig(f"results/MSE/{study_name}_MSE_plots.png", dpi=300)
+            
+            
+            
+
+for study_name in study_names:
+    for cell_type in broad_cell_types:
+        
+        adata = sc.read(f'data/pseudobulk/{study_name}-broad.h5ad')
+        adata = adata[adata.obs['broad_cell_type'] == cell_type, :]
+
+        if 'SEAAD' in study_name:
+            cols = ['Cognitive status','ADNC','Braak stage','Thal phase','Last CASI Score',
+                    'CERAD score','LATE-NC stage','Atherosclerosis','Arteriolosclerosis',
+                    'Lewy body disease pathology','Microinfarct pathology',
+                    'Continuous Pseudo-progression Score_x','APOE4 status', 
+                    'Neurotypical reference','ACT','ADRC Clinical Core',
+                    'Age at Death','Age of onset cognitive symptoms',
+                    'Age of Dementia diagnosis','Sex','PMI','Brain pH','RIN',
+                    'Fresh Brain Weight', 'Years of education','self_reported_ethnicity']
+
+            if cell_type == 'Excitatory':
+                cols.extend(['L2/3 IT_num','L4 IT_num','L5 ET_num','L5 IT_num', 
+                             'L5/6 NP_num','L6 CT_num','L6 IT_num','L6 IT Car3_num','L6b_num'])
+            if cell_type == 'Inhibitory':
+                cols.extend(['Lamp5_num','Lamp5 Lhx6_num','Pax6_num','Pvalb_num','Sncg_num',
+                             'Sst_num','Sst Chodl_num','Vip_num'])
+                
+        H = pd.read_table(f'results/NMF/{study_name}-{cell_type}_H.tsv', index_col=0)
+        meta = adata.obs[cols].loc[H.index]
+        
+        
+        import pandas as pd
+        from scipy.stats import pearsonr, chi2_contingency, f_oneway
+        import numpy as np
+        from itertools import product
+
+        def cramers_v(x, y):
+            confusion_matrix = pd.crosstab(x, y)
+            chi2 = chi2_contingency(confusion_matrix)[0]
+            n = confusion_matrix.sum().sum()
+            phi2 = chi2 / n
+            r, k = confusion_matrix.shape
+            phi2corr = max(0, phi2 - ((k-1)*(r-1))/(n-1))
+            rcorr = r - ((r-1)**2)/(n-1)
+            kcorr = k - ((k-1)**2)/(n-1)
+            return np.sqrt(phi2corr / min((kcorr-1), (rcorr-1)))
+        
+        def eta_squared(categorical, continuous):
+            groups = [continuous[categorical == cat] for cat in set(categorical)]
+            f_stat, p_value = f_oneway(*groups)
+            ss_between = (sum(len(group) * (np.mean(group) - np.mean(continuous))**2 for group in groups))
+            ss_total = (len(continuous) - 1) * np.var(continuous, ddof=1)
+            return ss_between / ss_total
+        
+        def calculate_associations(H, meta, absolute_R=True):
+            # encoding categorical and boolean columns to integers
+            meta = meta.apply(lambda x: x.cat.codes if x.dtype.name == 'category' else x)
+            meta = meta.apply(lambda x: x.astype(int) if x.dtype == bool else x)
+            
+            associations = pd.DataFrame(index=H.columns, columns=meta.columns)
+            
+            for col_H, col_meta in product(H.columns, meta.columns):
+                data_H, data_meta = H[col_H], meta[col_meta]
+                
+                # when both columns are categorical
+                if data_H.dtype.name == 'category' and data_meta.dtype.name == 'category':
+                    associations.at[col_H, col_meta] = cramers_v(data_H, data_meta)
+                
+                # when one column is categorical and the other is numeric
+                elif data_H.dtype.name == 'category' and pd.api.types.is_numeric_dtype(data_meta):
+                    associations.at[col_H, col_meta] = eta_squared(data_H, data_meta)
+                elif pd.api.types.is_numeric_dtype(data_H) and data_meta.dtype.name == 'category':
+                    associations.at[col_H, col_meta] = eta_squared(data_meta, data_H)
+                
+                # when both columns are numeric
+                elif pd.api.types.is_numeric_dtype(data_H) and pd.api.types.is_numeric_dtype(data_meta):
+                    valid_indices = ~data_H.isna() & ~data_meta.isna()
+                    data_H, data_meta = data_H[valid_indices], data_meta[valid_indices]
+                    if len(data_H) > 0:  # To ensure there's data after filtering NaNs
+                        r_value = pearsonr(data_H, data_meta)[0]
+                        associations.at[col_H, col_meta] = abs(r_value) if absolute_R else r_value
+                    else:
+                        associations.at[col_H, col_meta] = np.nan
+                        
+            associations = associations.astype(float)
+            return associations
+
+        associations = calculate_associations(H, meta)
+        associations.to_csv('results/tmp.csv')
+
+        row_link = linkage(pdist(associations.values), method='average', optimal_ordering=True)
+        col_link = linkage(pdist(associations.values.T), method='average', optimal_ordering=True)
+
+        sns.clustermap(associations, cmap='Reds', row_linkage=row_link, col_linkage=col_link, 
+                       square=True, rasterized=True)
+        plt.gcf().set_size_inches(9, 11) 
+        os.makedirs('results/Assoc', exist_ok=True)
+        plt.savefig(f"results/Assoc/{study_name}-{cell_type}_hvg_plot.png", dpi=300)
+      
+            
+            
+
+            
             
 
 for study_name in study_names:
@@ -143,7 +274,7 @@ for study_name in study_names:
         adata = sc.read(f'data/pseudobulk/{study_name}-pseudobulk.h5ad')
         adata = adata[adata.obs['broad_cell_type'] == cell_type, :]
 
-        if study_name == 'SEAAD':
+        if 'SEAAD' in study_name:
             meta = adata.obs[['Age at death','Cognitive status','ADNC','Braak stage','Thal phase',
                               'CERAD score','APOE4 status','Lewy body disease pathology','LATE-NC stage',
                               'Microinfarct pathology','PMI','disease','sex','ethnicity','num_cells']]
@@ -281,26 +412,3 @@ for study_name in study_names:
         os.makedirs('results/consensus', exist_ok=True)
         plt.savefig(f'results/consensus/{study_name}-{cell_type}_consensus_heatmap.png')
         
-        
-        
-        
-        
-        
-        
-        
-        
-                    # # subset to case-control differentially expressed genes 
-            # degs = pd.read_csv('/home/s/shreejoy/karbabi/projects/reverse_signatures/data/DE/de_aspan_voombygroup_p400.tsv', sep='\t')\
-            #     .assign(broad_cell_type=lambda df: df.cell_type
-            #             .replace({'Astro':'Astrocyte',
-            #                       'Endo':'Endothelial',
-            #                       'Glut':'Excitatory',
-            #                       'GABA':'Inhibitory',
-            #                       'Micro':'Microglia-PVM',
-            #                       'Oligo':'Oligodendrocyte',
-            #                       'OPC':'OPC'}))\
-            #     .query(f'broad_cell_type == "{cell_type}" & ids == "allids" & study == "p400"')\
-            #     .sort_values('fdr')\
-            #     .head(1000)
-            # degs = degs['gene'].astype(str).tolist()   
-            # adata = adata[:, adata.var_names.isin(degs)].copy()
