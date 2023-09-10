@@ -2,6 +2,7 @@ import anndata as ad, numpy as np, pandas as pd, scanpy as sc, sys, os, gc, warn
 sys.path.append(os.path.expanduser('~wainberg'))
 from utils import Timer, get_pseudobulk
 warnings.filterwarnings("ignore", category=FutureWarning)
+pd.set_option('display.max_rows', 200)
 os.chdir('/home/s/shreejoy/karbabi/projects/reverse_signatures/data')
 
 # Anndata format:
@@ -53,16 +54,6 @@ else:
                     [['gene_ids']]\
                     .rename_axis('gene')\
                     .rename(columns={'gene_ids': 'Ensembl_ID'})
-            # QC per cell type; there are memory issues doing this for the whole dataset
-            # should already be performed by original authors 
-            num_cells_i = data_per_cell_type[cell_type].shape[0]
-            sc.pp.filter_cells(data_per_cell_type[cell_type], min_genes=200)
-            mitochondrial_genes = data_per_cell_type[cell_type].var.index.str.startswith('MT-')
-            percent_mito = data_per_cell_type[cell_type][:, mitochondrial_genes].X.sum(axis=1).A1 / \
-                data_per_cell_type[cell_type].X.sum(axis=1).A1
-            data_per_cell_type[cell_type] = data_per_cell_type[cell_type][percent_mito < 0.05]
-            num_cells_f = data_per_cell_type[cell_type].shape[0]
-            print(f"[SEAAD {region}] Dropped {num_cells_i - num_cells_f} {cell_type} cells after QC.")
             # clean-up
             del data_per_cell_type[cell_type].uns
             del data_per_cell_type[cell_type].obsm
@@ -130,7 +121,11 @@ else:
                      'Total Microinfarcts (not observed grossly)': 'Int32', 'Total microinfarcts in screening sections': 'Int32',
                      'Years of education': 'Int32', 'assay': 'category', 'broad_cell_type': 'category', 'cell_type': 'category', 
                      'disease': 'category', 'self_reported_ethnicity': 'category', 'tissue': 'category'})\
-            .pipe(lambda df: pd.concat([df, pd.get_dummies(df['Subclass']).groupby(df['donor_id']).transform('sum').add_suffix('_num')], axis=1))
+           .pipe(lambda df: pd.concat([df, pd.get_dummies(df['cell_type'])
+                                      .groupby(df['projid'])
+                                      .transform('sum')
+                                      .add_suffix('_num')
+                                      .astype('Int64')], axis=1))
 
         print(f'[SEAAD {region}] Saving...')
         data.write(data_file)
@@ -148,26 +143,28 @@ if not os.path.exists(f'pseudobulk/SEAAD-{region}-broad.h5ad'):
 
 with Timer('[p400] Loading AD data'):
     data = sc.read('single-cell/p400/p400_qced_shareable.h5ad')
-    tmp1 = data.obs\
+    data.obs = data.obs\
         .assign(broad_cell_type=lambda df: df.subset
-            .replace({
-                'CUX2+': 'Excitatory',
-                'Astorcytes': 'Astrocyte',
-                'Microglia': 'Microglia-PVM',
-                'Oligodendrocytes': 'Oligodendrocyte'})).astype('category')
-
+            .replace({'CUX2+': 'Excitatory',
+                      'Astorcytes': 'Astrocyte', 
+                      'Microglia': 'Microglia-PVM',
+                      'Oligodendrocytes': 'Oligodendrocyte'}).astype('category'))
     print('[p400] Joining with external metadata...')
     # check that all duplicate projids have the same metadata
-    assert not any(pd.read_csv('single-cell/p400/dataset_978_basic_04-21-2023_ordered.csv')\
+    assert not any(pd.read_csv('single-cell/p400/dataset_978_basic_04-21-2023.csv')\
                     [lambda df: df.duplicated('projid', keep=False)]\
                     .groupby('projid').apply(lambda x: x.nunique() > 1).sum(axis=1) > 0)
-    metadata = pd.read_csv('single-cell/p400/dataset_978_basic_04-21-2023_ordered.csv')\
+    metadata = pd.read_csv('single-cell/p400/dataset_978_basic_04-21-2023.csv')\
         .drop_duplicates(subset='projid')\
         .drop(['braaksc','ceradsc','pmi','niareagansc','msex'], axis=1)
-    tmp = tmp1\
+    cell_type_labels = pd.concat([pd.read_table('single-cell/p400/Glut_cell_type_labels.tsv', index_col=0),
+                                  pd.read_table('single-cell/p400/GABA_cell_type_labels.tsv', index_col=0)], axis=0)\
+                        .query('study_name == "p400"')
+    data.obs = data.obs\
         .reset_index()\
+        .merge(cell_type_labels['cell_type'], left_on='index', right_index=True, how='left')\
+        .assign(cell_type=lambda df: df['cell_type'].fillna(df['broad_cell_type']).astype('category'))\
         .merge(metadata, on='projid', how='left')\
-        .apply(lambda col: col.replace({' ': pd.NA, 'NA': pd.NA, '<NA>': pd.NA, 'nan': pd.NA}))\
         .dropna(axis=1, how='all')\
         .set_index('index')\
         .astype({'braaksc': 'Int32', 'ceradsc': 'Int32', 'niareagansc': 'Int32',
@@ -187,23 +184,32 @@ with Timer('[p400] Loading AD data'):
                 'arteriol_scler': 'category', 'caa_4gp': 'category', 'cvda_4gp2': 'category', 
                 'ci_num2_gct': 'category', 'ci_num2_mct': 'category', 'emotional_neglect': 'Int32',
                 'family_pro_sep': 'Int32', 'financial_need': 'Int32', 'parental_intimidation': 'Int32',
-                'parental_violence': 'Int32', 'tot_adverse_exp': 'Int32', 'angerin': 'Int32', 
-                'angerout': 'Int32', 'angertrait': 'Int32', 'disord_regiment': 'Int32', 
-                'explor_rigid': 'Int32', 'extrav_reserv': 'Int32', 'haanticipatoryworry': 'Int32', 
-                'hafatigability': 'Int32', 'hafearuncetainty': 'Int32', 'harmavoidance': 'Int32', 
-                'hashyness': 'Int32', 'impul_reflect': 'Int32', 'nov_seek': 'Int32', 'tomm40_hap': 'category', 
+                'parental_violence': 'Int32', 'tot_adverse_exp': 'Int32', 'angerin': float, 
+                'angerout': 'Int32', 'angertrait': float, 'disord_regiment': 'Int32', 
+                'explor_rigid': 'Int32', 'extrav_reserv': 'Int32', 'haanticipatoryworry': float, 
+                'hafatigability': float, 'hafearuncetainty': float, 'harmavoidance': float, 
+                'hashyness': float, 'impul_reflect': 'Int32', 'nov_seek': 'Int32', 'tomm40_hap': 'category', 
                 'age_first_ad_dx': float, 'marital_now_bl': 'category', 'agefirst': 'Int32', 
                 'agelast': 'Int32', 'menoage': 'Int32', 'mensage': 'Int32', 'natura': 'category', 
                 'othspe00': 'category', 'whatwas': 'category', 'med_con_sum_bl': 'category', 
-                'ad_reagan': 'category', 'mglia123_caud_vm': float, 'mglia123_it': float, 'mglia123_mf': float,
-                'mglia123_put_p': float, 'mglia23_caud_vm': float, 'mglia23_it': float, 'mglia23_mf': float,
-                'mglia23_put_p': float, 'mglia3_caud_vm': float, 'mglia3_it': float, 'mglia3_mf': float,
-                'mglia3_put_p': float, 'tdp_st4': 'category', 'cog_res_age12': float, 'cog_res_age40': float, 
-                'tot_cog_res': float, 'early_hh_ses': float, 'income_bl': 'Int32', 'ladder_composite': float, 
-                'mateduc': 'Int32', 'pareduc': 'Int32', 'pateduc': 'Int32', 
+                'ad_reagan': 'category', 'mglia123_caud_vm': float, 'mglia123_it': float, 
+                'mglia123_mf': float, 'mglia123_put_p': float, 'mglia23_caud_vm': float, 'mglia23_it': float,
+                'mglia23_mf': float, 'mglia23_put_p': float, 'mglia3_caud_vm': float, 'mglia3_it': float,
+                'mglia3_mf': float, 'mglia3_put_p': float, 'tdp_st4': 'category', 'cog_res_age12': float,
+                'cog_res_age40': float, 'tot_cog_res': float, 'early_hh_ses': float, 'income_bl': 'Int32',
+                'ladder_composite': float,'mateduc': 'Int32', 'pareduc': float, 'pateduc': 'Int32',
                 'q40inc': 'Int32'})\
-        .pipe(lambda df: pd.concat([df, pd.get_dummies(df['Subclass']).groupby(df['donor_id']).transform('sum').add_suffix('_num')], axis=1))
-
+        .apply(lambda col: col.replace({' ': pd.NA, 'NA': pd.NA, '<NA>': pd.NA, 'nan': pd.NA}))\
+        .pipe(lambda df: pd.concat([df, pd.get_dummies(df['cell_type'])
+                                    .groupby(df['projid'])
+                                    .transform('sum')
+                                    .add_suffix('_num')
+                                    .astype('Int64')], axis=1))
+        
+if not os.path.exists(f'pseudobulk/p400-broad.h5ad'):
+    with Timer(f'[p400] Pseudobulking and saving'):
+            pseudobulk = get_pseudobulk(data, 'projid', 'broad_cell_type', return_anndata=True)
+            pseudobulk.write(f'pseudobulk/p400-broad.h5ad')
 
 ################################################################################
 # Load Parkinson's data (10 PD/LBD individuals and 8 neurotypical controls)
@@ -428,7 +434,17 @@ print_dataset_sizes('After filtering to cells with <5% mitochondrial reads',
 
 
 
-
+            
+# QC per cell type, due to memory constraints 
+# should already be performed by original authors 
+num_cells_i = data_per_cell_type[cell_type].shape[0]
+sc.pp.filter_cells(data, min_genes=200)
+mitochondrial_genes = data_per_cell_type[cell_type].var.index.str.startswith('MT-')
+percent_mito = data_per_cell_type[cell_type][:, mitochondrial_genes].X.sum(axis=1).A1 / \
+data_per_cell_type[cell_type].X.sum(axis=1).A1
+data_per_cell_type[cell_type] = data_per_cell_type[cell_type][percent_mito < 0.05]
+num_cells_f = data_per_cell_type[cell_type].shape[0]
+print(f"[SEAAD {region}] Dropped {num_cells_i - num_cells_f} {cell_type} cells after QC.")
 
 pseudobulks = {}
 for dataset_name, dataset in datasets.items():
