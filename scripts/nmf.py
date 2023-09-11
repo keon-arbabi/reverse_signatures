@@ -7,8 +7,7 @@ from scipy.cluster.hierarchy import linkage
 sys.path.append('projects/reverse_signatures/scripts')
 from utils import Timer, rmatrix_to_df, array_to_rmatrix, rdf_to_df
 warnings.filterwarnings("ignore", category=FutureWarning)
-pd.set_option('display.max_rows', None)
-r.library('RcppML')
+r.library('RcppML', quietly=True)
 os.chdir('/home/s/shreejoy/karbabi/projects/reverse_signatures')
 
 # for each cell broad cell type and study
@@ -16,11 +15,52 @@ broad_cell_types = 'Excitatory', 'Inhibitory', 'Oligodendrocyte', 'Astrocyte',\
     'Microglia-PVM', 'OPC', 'Endothelial'
 study_names = 'SEAAD-DLPFC'
 
-cell_type = 'Excitatory'
-study_name = 'SEAAD-MTG'
+cell_type = 'Inhibitory'
+study_name = 'SEAAD-DLPFC'
 
 MSE_trial = {}
 k_1se_trial = {}
+
+def process_data(study_name, cell_type):
+        adata = sc.read(f'data/pseudobulk/{study_name}-broad.h5ad')
+        adata = adata[adata.obs['broad_cell_type'] == cell_type, :]
+
+        # # subset to the 2000 most highly variable genes
+        # hvg = np.argpartition(-np.var(adata.X, axis=0), 2000)[:2000]
+        # adata = adata[:, hvg].copy()
+        
+        # subset to case-control differentially expressed genes
+        degs = pd.read_csv('data/differential-expression/de_aspan_voombygroup_p400.tsv', sep='\t')\
+            .assign(broad_cell_type=lambda df: df.cell_type
+                    .replace({'Astro': 'Astrocyte',
+                              'Endo': 'Endothelial',
+                              'Glut': 'Excitatory',
+                              'GABA': 'Inhibitory',
+                              'Micro': 'Microglia-PVM',
+                              'Oligo': 'Oligodendrocyte',
+                              'OPC': 'OPC'}))\
+            .query(f'broad_cell_type == "{cell_type}" & ids == "allids" & study == "p400"')\
+            .query('p_value < 0.05')
+        degs = degs['gene'].astype(str).tolist()
+        adata = adata[:, adata.var_names.isin(degs)].copy()
+        
+        # convert to log CPMs
+        adata.X = np.log1p(adata.X * (1000000 / adata.X.sum(axis=1))[:, None])
+        adata.X *= 1 / np.log(2)
+
+        assert not np.any(adata.X < 0), "Array contains negative numbers"
+        log_CPMs_R = array_to_rmatrix(adata.X.T)
+        gene_names = adata.var_names
+        samp_names = adata.obs_names
+
+
+
+
+
+
+
+
+
 
 flavour = 'DEG_L1'
 for study_name in [study_names]:

@@ -2,7 +2,7 @@ import anndata as ad, numpy as np, pandas as pd, scanpy as sc, sys, os, gc, warn
 sys.path.append(os.path.expanduser('~wainberg'))
 from utils import Timer, get_pseudobulk
 warnings.filterwarnings("ignore", category=FutureWarning)
-pd.set_option('display.max_rows', 200)
+pd.set_option('display.max_rows', None)
 os.chdir('/home/s/shreejoy/karbabi/projects/reverse_signatures/data')
 
 # Anndata format:
@@ -18,7 +18,7 @@ os.chdir('/home/s/shreejoy/karbabi/projects/reverse_signatures/data')
 ################################################################################
 
 # select either DLPFC or MTG
-region = 'DLPFC'
+region = 'MTG'
 
 data_file = f'single-cell/SEAAD/{region}/SEAAD-{region}.h5ad'
 if os.path.exists(data_file):
@@ -27,6 +27,7 @@ if os.path.exists(data_file):
 else:
     with Timer(f'[SEAAD {region}] Preprocessing AD data'):
         from scipy.sparse import vstack
+        cell_types = pd.Index(['Sst_Chodl'])
         cell_types = pd.Index(['Astrocyte', 'Chandelier', 'Endothelial', 'L23_IT', 'L4_IT',
                                 'L56_NP', 'L5_ET', 'L5_IT', 'L6_CT', 'L6_IT',
                                 'L6_IT_Car3', 'L6b', 'Lamp5', 'Lamp5_Lhx6',
@@ -71,62 +72,57 @@ else:
         data = ad.AnnData(X=X, obs=obs, var=var, dtype=X.dtype)
         
         print(f'[SEAAD {region}] Joining with external metadata...')
-        pseudo_progression_scores = pd.read_csv('single-cell/SEAAD/pseudoprogression_scores_meta.csv')
+        pseudo_progression_scores = pd.read_csv('single-cell/SEAAD/pseudoprogression_scores_meta.csv')  
         metadata = pd.read_excel('single-cell/SEAAD/sea-ad_cohort_donor_metadata.xlsx')\
-            .drop(['CERAD score','LATE','APOE4 Status','Cognitive Status',
-                'Overall AD neuropathological Change','Highest Lewy Body Disease',
-                'Thal','Braak'], axis=1)
+            .drop(['CERAD score', 'LATE', 'APOE4 Status', 'Cognitive Status',
+                'Overall AD neuropathological Change', 'Highest Lewy Body Disease',
+                'Thal', 'Braak'], axis=1)
         data.obs = data.obs\
             .drop(['PMI', 'Years of education', 'sex', 'Age at death'], axis=1)\
             .assign(broad_cell_type=lambda df: np.where(
                 df.Class == 'Non-neuronal and Non-neural', df.Subclass, np.where(
                 df.Class == 'Neuronal: Glutamatergic', 'Excitatory', np.where(
                 df.Class == 'Neuronal: GABAergic', 'Inhibitory', np.nan))))\
-            .reset_index()\
-            .merge(pseudo_progression_scores, on = 'donor_id', how='left')\
+            .reset_index()
+        if region == 'DLPFC':
+            data.obs = data.obs.merge(pseudo_progression_scores, on='donor_id', how='left')
+        data.obs = data.obs\
             .merge(metadata, left_on='donor_id', right_on='Donor ID', how='left')\
             .drop('Donor ID', axis=1)\
-            .loc[:, lambda df: ~df.columns.str.contains('choice')]\
             .set_index('exp_component_name')\
-            .astype({col: pd.CategoricalDtype(categories=cat, ordered=True) 
-                     for col, cat in {
+            .pipe(lambda df: df.assign(**{col: df[col].replace({'Checked': True, 'Unchecked': False})
+                                        for col in df.select_dtypes(include=['object']).columns
+                                        if df[col].isin(['Checked', 'Unchecked']).all()}))\
+            .astype({col: pd.CategoricalDtype(categories=cat, ordered=True)
+                    for col, cat in {
                         'Cognitive status': ['Reference', 'No dementia', 'Dementia'],
                         'ADNC': ['Reference', 'Not AD', 'Low', 'Intermediate', 'High'],
                         'Braak stage': ['Reference', 'Braak 0', 'Braak II', 'Braak III', 'Braak IV', 'Braak V', 'Braak VI'],
                         'Thal phase': ['Reference', 'Thal 0', 'Thal 1', 'Thal 2', 'Thal 3', 'Thal 4', 'Thal 5'],
                         'CERAD score': ['Reference', 'Absent', 'Sparse', 'Moderate', 'Frequent'],
                         'LATE-NC stage': ['Staging Precluded by FTLD with TDP43 or ALS/MND or TDP-43 pathology is unclassifiable',
-                                          'Reference', 'Not Identified','LATE Stage 1', 'LATE Stage 2', 'LATE Stage 3'],
+                                        'Reference', 'Not Identified', 'LATE Stage 1', 'LATE Stage 2', 'LATE Stage 3'],
                         'Atherosclerosis': ['Mild', 'Moderate', 'Severe'],
                         'Arteriolosclerosis': ['Mild', 'Moderate', 'Severe']}.items()})\
             .assign(**{
-                'PMI': lambda df: df['PMI'].fillna(df['PMI'].median())\
-                    .astype(float),
-                'Fresh Brain Weight': lambda df: df['Fresh Brain Weight']
-                    .replace({'Unavailable': pd.NA})
-                    .astype('Int64'),
-                'APOE4 status': lambda df: df['APOE4 status']\
-                    .eq('Y'),
-                'Neurotypical reference': lambda df: df['Neurotypical reference']\
-                    .eq('True'),
-                'ACT': lambda df: df['Primary Study Name']\
-                    .eq('ACT'),
+                'PMI': lambda df: df['PMI'].fillna(df['PMI'].median()).astype(float),
+                'Fresh Brain Weight': lambda df: df['Fresh Brain Weight'].replace({'Unavailable': pd.NA}).astype('Int64'),
+                'APOE4 status': lambda df: df['APOE4 status'].eq('Y'),
+                'Neurotypical reference': lambda df: df['Neurotypical reference'].eq('True'),
+                'ACT': lambda df: df['Primary Study Name'].eq('ACT'),
                 'ADRC Clinical Core': lambda df: df['Primary Study Name'].eq('ADRC Clinical Core')})\
             .assign(**{key: lambda df, key=key: pd.to_numeric(df[key].replace('90+', '90')).astype('Int64')
-                    for key in ('Age at Death','Age of onset cognitive symptoms','Age of Dementia diagnosis')})\
-            .astype({'assay': 'category', 'Brain pH': float, 'Fraction mitochrondrial UMIs': float, 
-                     'Genes detected': 'Int64', 'Last CASI Score': 'Int32', 'Lewy body disease pathology': 'category', 
-                     'Microinfarct pathology': 'category', 'Number of UMIs': 'Int64', 'RIN': float, 'Sex': 'category', 
-                     'Specimen ID': 'category', 'Subclass': 'category', 'Supertype': 'category', 
-                     'Total Microinfarcts (not observed grossly)': 'Int32', 'Total microinfarcts in screening sections': 'Int32',
-                     'Years of education': 'Int32', 'assay': 'category', 'broad_cell_type': 'category', 'cell_type': 'category', 
-                     'disease': 'category', 'self_reported_ethnicity': 'category', 'tissue': 'category'})\
-           .pipe(lambda df: pd.concat([df, pd.get_dummies(df['cell_type'])
-                                      .groupby(df['projid'])
-                                      .transform('sum')
-                                      .add_suffix('_num')
-                                      .astype('Int64')], axis=1))
-
+                    for key in ('Age at Death', 'Age of onset cognitive symptoms', 'Age of Dementia diagnosis')})\
+            .astype({'assay': 'category', 'Brain pH': float, 'Fraction mitochrondrial UMIs': float,
+                    'Genes detected': 'Int64', 'Last CASI Score': 'Int32', 'Lewy body disease pathology': 'category',
+                    'Microinfarct pathology': 'category', 'Number of UMIs': 'Int64', 'RIN': float, 'Sex': 'category',
+                    'Specimen ID': 'category', 'Subclass': 'category', 'Supertype': 'category',
+                    'Total Microinfarcts (not observed grossly)': 'Int32', 'Total microinfarcts in screening sections': 'Int32',
+                    'Years of education': 'Int32', 'assay': 'category', 'broad_cell_type': 'category', 'cell_type': 'category',
+                    'disease': 'category', 'self_reported_ethnicity': 'category', 'tissue': 'category'})\
+            .apply(lambda col: col.replace({' ': pd.NA, 'NA': pd.NA, '<NA>': pd.NA, 'nan': pd.NA}))\
+            .pipe(lambda df: pd.concat([df, pd.get_dummies(df['Subclass'])
+                                    .groupby(df['donor_id']).transform('sum').add_suffix('_num') .astype('Int64')], axis=1))
         print(f'[SEAAD {region}] Saving...')
         data.write(data_file)
         
@@ -197,14 +193,11 @@ with Timer('[p400] Loading AD data'):
                 'mglia23_mf': float, 'mglia23_put_p': float, 'mglia3_caud_vm': float, 'mglia3_it': float,
                 'mglia3_mf': float, 'mglia3_put_p': float, 'tdp_st4': 'category', 'cog_res_age12': float,
                 'cog_res_age40': float, 'tot_cog_res': float, 'early_hh_ses': float, 'income_bl': 'Int32',
-                'ladder_composite': float,'mateduc': 'Int32', 'pareduc': float, 'pateduc': 'Int32',
+                'ladder_composite': float, 'mateduc': 'Int32', 'pareduc': float, 'pateduc': 'Int32',
                 'q40inc': 'Int32'})\
         .apply(lambda col: col.replace({' ': pd.NA, 'NA': pd.NA, '<NA>': pd.NA, 'nan': pd.NA}))\
         .pipe(lambda df: pd.concat([df, pd.get_dummies(df['cell_type'])
-                                    .groupby(df['projid'])
-                                    .transform('sum')
-                                    .add_suffix('_num')
-                                    .astype('Int64')], axis=1))
+                                    .groupby(df['projid']).transform('sum').add_suffix('_num').astype('Int64')], axis=1))
         
 if not os.path.exists(f'pseudobulk/p400-broad.h5ad'):
     with Timer(f'[p400] Pseudobulking and saving'):

@@ -1,30 +1,27 @@
-import numpy as np, os, pandas as pd, scanpy as sc, warnings
+import numpy as np, pandas as pd, scanpy as sc, warnings, os, sys
 from functools import reduce
 from itertools import combinations, product
 from rpy2.robjects import Formula, r
 from scipy.stats import pearsonr
+sys.path.append(os.path.expanduser('~wainberg'))
 from utils import array_to_rvector, bonferroni, df_to_rdf, df_to_rmatrix, fdr, \
-    percentile_transform, rmatrix_to_df, rdf_to_df, unalias, Timer
+    rmatrix_to_df, rdf_to_df, Timer
+os.chdir('/home/s/shreejoy/karbabi/projects/reverse_signatures')
+warnings.filterwarnings("ignore", category=FutureWarning)
 r.library('edgeR', quietly=True)
 
 ################################################################################
 # Define data fields we're using
 ################################################################################
 
-covariate_columns = {
-    'AD': ['Age at death', 'sex', 'APOE4 status', 'Metadata: PMI', 'Study: ACT', 'num_cells'],
-    # 'Study: ADRC Clinical Core' is multicollinear
-    'PD': ['organ__ontology_label', 'sex', 'Donor_Age', 'Donor_PMI', 'num_cells'],
-    'SCZ': ['Batch', 'Gender', 'Age', 'PMI', 'num_cells']}  # TODO should use log(# cells)
-    # 'Cohort' is collinear with Batch; 'HTO' is also collinear with something
-cell_type_column = {'AD': 'broad_cell_type', 'PD': 'broad_cell_type',
-                    'SCZ': 'broad_cell_type'}
-fine_cell_type_column = {'AD': 'Supertype', 'PD': 'Cell_Type',
-                         'SCZ': 'Celltype'}
-ID_column = {'AD': 'Donor ID', 'PD': 'donor_id', 'SCZ': 'unique_donor_ID'}
-phenotype_column = {'AD': 'disease', 'PD': 'disease__ontology_label',
-                    'SCZ': 'Phenotype'}
-control_name = {'AD': 'normal', 'PD': 'normal', 'SCZ': 'CON'}
+covariate_columns = {'SEAAD-MTG': ['Age at death', 'Sex', 'APOE4 status', 'PMI', 'ACT', 'num_cells'],
+                     'SEAAD-DLPFC': ['Age at death', 'Sex', 'APOE4 status', 'PMI', 'ACT', 'num_cells']}
+                     #'p400': ['age_death', 'sex', 'apoe_genotype', 'pmi', 'num_cells']} 
+cell_type_column = {'SEAAD-MTG': 'broad_cell_type', 'SEAAD-DLPFC': 'broad_cell_type'}
+fine_cell_type_column = {'SEAAD-MTG': 'Subclass', 'SEAAD-DLPFC': 'Subclass'}
+ID_column = {'SEAAD-MTG': 'donor_id', 'SEAAD-DLPFC': 'donor_id'}
+phenotype_column = {'SEAAD-MTG': 'disease', 'SEAAD-DLPFC': 'disease'}
+control_name = {'SEAAD-MTG': 'normal', 'SEAAD-DLPFC': 'normal'}
 
 ################################################################################
 # Load pseudobulks
@@ -40,21 +37,14 @@ def get_number_of_genes(datasets):
             for trait, dataset in datasets.items()}
 
 # Load pseudobulks
-# Note: already removed 3 PD folks (3839, 4340, 5730) w/ all-NA cell-type labels
-
-pseudobulk_files = {'AD': 'SEA-AD/pseudobulk.h5ad',
-                    'PD': 'Macosko/pseudobulk.h5ad',
-                    'SCZ': 'SZBDMulticohort/pseudobulk.h5ad'}
+pseudobulk_files = {'SEAAD-MTG': 'data/pseudobulk/SEAAD-MTG-broad.h5ad',
+                    'SEAAD-DLPFC': 'data/pseudobulk/SEAAD-DLPFC-broad.h5ad'}
+                    #'p400': 'data/pseudobulk/p400-broad.h5ad'}
 pseudobulks = {trait: sc.read(pseudobulk_file)
                for trait, pseudobulk_file in pseudobulk_files.items()}
-assert (sample_sizes := get_sample_sizes(pseudobulks)) == {
-    'AD': {'dementia': 42, 'normal': 47},
-    'PD': {'Lewy body dementia': 4, 'Parkinson disease': 6, 'normal': 8},
-    'SCZ': {'CON': 75, 'SZ': 65}}, sample_sizes
-assert (number_of_genes := get_number_of_genes(pseudobulks)) == \
-       {'AD': 36517, 'PD': 41625, 'SCZ': 17658}, number_of_genes
 
-# Split PD into PD and LBD
+get_sample_sizes(pseudobulks)
+get_number_of_genes(pseudobulks)
 
 pseudobulks = {
     'AD': pseudobulks['AD'],
