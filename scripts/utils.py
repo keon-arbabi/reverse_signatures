@@ -453,36 +453,36 @@ def get_rpy2_vector_class(array_or_index_or_series_or_df: object):
     assert isinstance(array_or_index_or_series_or_df,
                       (np.ndarray, pd.Index, pd.Series, pd.DataFrame))
     from rpy2.robjects import FloatVector, IntVector, r, StrVector
+    
     if isinstance(array_or_index_or_series_or_df, pd.DataFrame):
         assert array_or_index_or_series_or_df.dtypes.nunique() == 1, \
             array_or_index_or_series_or_df.dtypes.value_counts()
         dtype = array_or_index_or_series_or_df.dtypes[0]
     else:
         dtype = array_or_index_or_series_or_df.dtype
-    # noinspection PyUnresolvedReferences
+    # handle new nullable types properly
     if isinstance(dtype, pd.CategoricalDtype):
         return categorical_to_factor
-    elif np.issubdtype(dtype, np.floating):
+    elif pd.api.types.is_float_dtype(dtype):
         vector_class = FloatVector if dtype == float else \
             lambda x: FloatVector(x.astype(float))
-    elif np.issubdtype(dtype, np.integer):
-        vector_class = IntVector if dtype == 'int32' else \
-            lambda x: IntVector(x.astype('int32'))
-    elif dtype == bool:
-        vector_class = lambda x: r['as.logical'](IntVector(x.astype('int32')))
-    elif isinstance(array_or_index_or_series_or_df, np.ndarray) and \
-            dtype.type is np.str_ or \
-            isinstance(array_or_index_or_series_or_df, pd.DataFrame) and \
-            array_or_index_or_series_or_df.apply(pd._libs.lib.infer_dtype)\
-                    .eq('string').all() or \
-            pd._libs.lib.infer_dtype(array_or_index_or_series_or_df) == \
-            'string':
+    elif pd.api.types.is_integer_dtype(dtype) or dtype == bool:
+        vector_class = IntVector if dtype == np.int32 else \
+            lambda x: IntVector(x.astype(np.int32))
+        if dtype == bool:
+            vector_class = lambda x: r['as.logical'](IntVector(x.astype(np.int32)))
+    elif isinstance(array_or_index_or_series_or_df, np.ndarray) and dtype.type is np.str_ \
+            or (isinstance(array_or_index_or_series_or_df, pd.DataFrame) and 
+                array_or_index_or_series_or_df.apply(pd._libs.lib.infer_dtype).eq('string').all()) \
+            or pd._libs.lib.infer_dtype(array_or_index_or_series_or_df) == 'string':
         vector_class = StrVector
     else:
         raise ValueError(f'Unsupported dtype "{dtype}"!')
+    # conversion only applied to DataFrames
     if not isinstance(array_or_index_or_series_or_df, np.ndarray):
         vector_class = lambda x, vector_class=vector_class: \
-            vector_class(x.values)
+            vector_class(x.values) if isinstance(x, pd.DataFrame) else vector_class(x)
+
     return vector_class
 
 def array_to_rvector(array):
