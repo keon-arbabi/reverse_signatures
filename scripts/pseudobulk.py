@@ -2,37 +2,34 @@ import anndata as ad, numpy as np, pandas as pd, scanpy as sc, sys, os, gc, warn
 sys.path.append(os.path.expanduser('~wainberg'))
 from utils import Timer, get_pseudobulk
 warnings.filterwarnings("ignore", category=FutureWarning)
-pd.set_option('display.max_rows', None)
+pd.set_option('display.max_rows', 10)
 os.chdir('/home/s/shreejoy/karbabi/projects/reverse_signatures/data')
 
 # Anndata format:
-# anndata.readthedocs.io/en/stable/generated/anndata.AnnData.html
-# Use CSR rather than CSC for faster pseudobulking:
-# e.g. pseudobulking AD took 32 hours with CSC but only 31 minutes with CSR
+# https://anndata.readthedocs.io/en/stable/generated/anndata.AnnData.html
+# Use CSR rather than CSC for faster pseudobulking
 
 ################################################################################
 # Load SEAAD Alzheimer's data
-# Documentation: https://portal.brain-map.org/explore/seattle-alzheimers-disease/seattle-alzheimers-disease-brain-cell-atlas-download
-# Download: https://cellxgene.cziscience.com/collections/1ca90a2d-2943-483d-b678-b809bf464c30
-# Metadata columns: https://brainmapportal-live-4cc80a57cd6e400d854-f7fdcae.divio-media.net/filer_public/b0/a8/b0a81899-7241-4814-8c1f-4a324db51b0b/sea-ad_donorindex_dataelementbriefdescriptions.pdf
+# Documentation and metadata: https://portal.brain-map.org/explore/seattle-alzheimers-disease/seattle-alzheimers-disease-brain-cell-atlas-download
+# Download counts: https://cellxgene.cziscience.com/collections/1ca90a2d-2943-483d-b678-b809bf464c30
 ################################################################################
 
 # select either DLPFC or MTG
 region = 'MTG'
-
 data_file = f'single-cell/SEAAD/{region}/SEAAD-{region}.h5ad'
+
 if os.path.exists(data_file):
     with Timer(f'[SEAAD {region}] Loading AD data'):
         data = sc.read(data_file)
 else:
     with Timer(f'[SEAAD {region}] Preprocessing AD data'):
         from scipy.sparse import vstack
-        cell_types = pd.Index(['Sst_Chodl'])
         cell_types = pd.Index(['Astrocyte', 'Chandelier', 'Endothelial', 'L23_IT', 'L4_IT',
-                                'L56_NP', 'L5_ET', 'L5_IT', 'L6_CT', 'L6_IT',
-                                'L6_IT_Car3', 'L6b', 'Lamp5', 'Lamp5_Lhx6',
-                                'Microglia-PVM', 'OPC', 'Oligodendrocyte', 'Pax6', 'Pvalb',
-                                'Sncg', 'Sst', 'Sst_Chodl', 'VLMC', 'Vip'])
+                                'L56_NP', 'L5_ET', 'L5_IT', 'L6_CT', 'L6_IT', 'L6_IT_Car3', 
+                                'L6b', 'Lamp5', 'Lamp5_Lhx6', 'Microglia-PVM', 'OPC', 
+                                'Oligodendrocyte', 'Pax6', 'Pvalb', 'Sncg', 'Sst', 
+                                'Sst_Chodl', 'VLMC', 'Vip'])
         data_per_cell_type = {}
         for cell_type in cell_types:
             print(f'[SEAAD {region}] Loading {cell_type}...')
@@ -51,8 +48,7 @@ else:
                 data_per_cell_type[cell_type].var\
                     .reset_index()\
                     .astype({'feature_name': str})\
-                    .set_index('feature_name')\
-                    [['gene_ids']]\
+                    .set_index('feature_name')[['gene_ids']]\
                     .rename_axis('gene')\
                     .rename(columns={'gene_ids': 'Ensembl_ID'})
             # clean-up
@@ -74,9 +70,8 @@ else:
         print(f'[SEAAD {region}] Joining with external metadata...')
         pseudo_progression_scores = pd.read_csv('single-cell/SEAAD/pseudoprogression_scores_meta.csv')  
         metadata = pd.read_excel('single-cell/SEAAD/sea-ad_cohort_donor_metadata.xlsx')\
-            .drop(['CERAD score', 'LATE', 'APOE4 Status', 'Cognitive Status',
-                'Overall AD neuropathological Change', 'Highest Lewy Body Disease',
-                'Thal', 'Braak'], axis=1)
+            .drop(['CERAD score', 'LATE', 'APOE4 Status', 'Cognitive Status', 'Overall AD neuropathological Change',
+                   'Highest Lewy Body Disease', 'Thal', 'Braak'], axis=1)
         data.obs = data.obs\
             .drop(['PMI', 'Years of education', 'sex', 'Age at death'], axis=1)\
             .assign(broad_cell_type=lambda df: np.where(
@@ -90,9 +85,7 @@ else:
             .merge(metadata, left_on='donor_id', right_on='Donor ID', how='left')\
             .drop('Donor ID', axis=1)\
             .set_index('exp_component_name')\
-            .pipe(lambda df: df.assign(**{col: df[col].replace({'Checked': True, 'Unchecked': False})
-                                        for col in df.select_dtypes(include=['object']).columns
-                                        if df[col].isin(['Checked', 'Unchecked']).all()}))\
+            .assign(num_cells_total = lambda df: df.groupby('donor_id')['donor_id'].transform('size'))\
             .astype({col: pd.CategoricalDtype(categories=cat, ordered=True)
                     for col, cat in {
                         'Cognitive status': ['Reference', 'No dementia', 'Dementia'],
@@ -104,19 +97,19 @@ else:
                                         'Reference', 'Not Identified', 'LATE Stage 1', 'LATE Stage 2', 'LATE Stage 3'],
                         'Atherosclerosis': ['Mild', 'Moderate', 'Severe'],
                         'Arteriolosclerosis': ['Mild', 'Moderate', 'Severe']}.items()})\
-            .assign(**{
-                'PMI': lambda df: df['PMI'].fillna(df['PMI'].median()).astype(float),
-                'Fresh Brain Weight': lambda df: df['Fresh Brain Weight'].replace({'Unavailable': pd.NA}).astype('Int64'),
-                'APOE4 status': lambda df: df['APOE4 status'].eq('Y'),
-                'Neurotypical reference': lambda df: df['Neurotypical reference'].eq('True'),
-                'ACT': lambda df: df['Primary Study Name'].eq('ACT'),
-                'ADRC Clinical Core': lambda df: df['Primary Study Name'].eq('ADRC Clinical Core')})\
+            .pipe(lambda df: df.assign(**{col: df[col].astype('category') for col in df.columns if "choice=" in col}))\
+            .assign(**{'PMI': lambda df: df['PMI'].fillna(df['PMI'].median()).astype(float),
+                    'Fresh Brain Weight': lambda df: df['Fresh Brain Weight'].replace({'Unavailable': pd.NA}).astype('Int64'),
+                    'APOE4 status': lambda df: df['APOE4 status'].eq('Y'),
+                    'Neurotypical reference': lambda df: df['Neurotypical reference'].eq('True'),
+                    'ACT': lambda df: df['Primary Study Name'].eq('ACT'),
+                    'ADRC Clinical Core': lambda df: df['Primary Study Name'].eq('ADRC Clinical Core')})\
             .assign(**{key: lambda df, key=key: pd.to_numeric(df[key].replace('90+', '90')).astype('Int64')
                     for key in ('Age at Death', 'Age of onset cognitive symptoms', 'Age of Dementia diagnosis')})\
-            .astype({'assay': 'category', 'Brain pH': float, 'Fraction mitochrondrial UMIs': float,
+            .astype({'assay': 'category', 'Brain pH': float, 'Fraction mitochrondrial UMIs': float, 
                     'Genes detected': 'Int64', 'Last CASI Score': 'Int32', 'Lewy body disease pathology': 'category',
                     'Microinfarct pathology': 'category', 'Number of UMIs': 'Int64', 'RIN': float, 'Sex': 'category',
-                    'Specimen ID': 'category', 'Subclass': 'category', 'Supertype': 'category',
+                    'Specimen ID': 'category', 'Subclass': 'category', 'Supertype': 'category', 'num_cells_total': 'Int64',
                     'Total Microinfarcts (not observed grossly)': 'Int32', 'Total microinfarcts in screening sections': 'Int32',
                     'Years of education': 'Int32', 'assay': 'category', 'broad_cell_type': 'category', 'cell_type': 'category',
                     'disease': 'category', 'self_reported_ethnicity': 'category', 'tissue': 'category'})\
@@ -141,68 +134,52 @@ with Timer('[p400] Loading AD data'):
     data = sc.read('single-cell/p400/p400_qced_shareable.h5ad')
     data.obs = data.obs\
         .assign(broad_cell_type=lambda df: df.subset
-            .replace({'CUX2+': 'Excitatory',
-                      'Astorcytes': 'Astrocyte', 
+            .replace({'OPCs': 'OPC',
+                      'CUX2+': 'Excitatory', 
+                      'Astrocytes': 'Astrocyte', 
                       'Microglia': 'Microglia-PVM',
                       'Oligodendrocytes': 'Oligodendrocyte'}).astype('category'))
-    print('[p400] Joining with external metadata...')
-    # check that all duplicate projids have the same metadata
-    assert not any(pd.read_csv('single-cell/p400/dataset_978_basic_04-21-2023.csv')\
-                    [lambda df: df.duplicated('projid', keep=False)]\
-                    .groupby('projid').apply(lambda x: x.nunique() > 1).sum(axis=1) > 0)
-    metadata = pd.read_csv('single-cell/p400/dataset_978_basic_04-21-2023.csv')\
-        .drop_duplicates(subset='projid')\
-        .drop(['braaksc','ceradsc','pmi','niareagansc','msex'], axis=1)
-    cell_type_labels = pd.concat([pd.read_table('single-cell/p400/Glut_cell_type_labels.tsv', index_col=0),
-                                  pd.read_table('single-cell/p400/GABA_cell_type_labels.tsv', index_col=0)], axis=0)\
-                        .query('study_name == "p400"')
-    data.obs = data.obs\
-        .reset_index()\
-        .merge(cell_type_labels['cell_type'], left_on='index', right_index=True, how='left')\
-        .assign(cell_type=lambda df: df['cell_type'].fillna(df['broad_cell_type']).astype('category'))\
-        .merge(metadata, on='projid', how='left')\
-        .dropna(axis=1, how='all')\
-        .set_index('index')\
-        .astype({'braaksc': 'Int32', 'ceradsc': 'Int32', 'niareagansc': 'Int32',
-                'cogdx': 'Int32', 'dlbdx': 'Int32', 'arteriol_scler': 'Int32',
-                'caa_4gp': 'Int32', 'cvda_4gp2': 'Int32', 'tomm40_hap': 'Int32',
-                'tdp_st4': 'Int32'})\
-        .astype({'study': 'category', 'apoe_genotype': 'category', 'amyloid': float, 
-                'plaq_d': float, 'plaq_n': float, 'braaksc': 'category', 'ceradsc': 'category', 
-                'gpath': float, 'niareagansc': 'category', 'tangles': float, 'nft': float,
-                'cogdx': 'category', 'age_bl': float, 'age_death': float, 'pmi': float, 
-                'race7': 'category', 'educ': 'Int32', 'spanish': 'category', 'ldai_bl': float,
-                'smoking': 'category', 'cancer_bl': 'category', 'headinjrloc_bl': 'category', 
-                'thyroid_bl': 'category', 'agreeableness': 'Int32', 'conscientiousness': 'Int32', 
-                'extraversion_6': 'Int32', 'neuroticism_12': 'Int32', 'openness': 'Int32', 
-                'chd_cogact_freq': float, 'lifetime_cogact_freq_bl': float, 'ma_adult_cogact_freq': float, 
-                'ya_adult_cogact_freq': float, 'hspath_typ': 'category', 'dlbdx': 'category', 
-                'arteriol_scler': 'category', 'caa_4gp': 'category', 'cvda_4gp2': 'category', 
-                'ci_num2_gct': 'category', 'ci_num2_mct': 'category', 'emotional_neglect': 'Int32',
-                'family_pro_sep': 'Int32', 'financial_need': 'Int32', 'parental_intimidation': 'Int32',
-                'parental_violence': 'Int32', 'tot_adverse_exp': 'Int32', 'angerin': float, 
-                'angerout': 'Int32', 'angertrait': float, 'disord_regiment': 'Int32', 
-                'explor_rigid': 'Int32', 'extrav_reserv': 'Int32', 'haanticipatoryworry': float, 
-                'hafatigability': float, 'hafearuncetainty': float, 'harmavoidance': float, 
-                'hashyness': float, 'impul_reflect': 'Int32', 'nov_seek': 'Int32', 'tomm40_hap': 'category', 
-                'age_first_ad_dx': float, 'marital_now_bl': 'category', 'agefirst': 'Int32', 
-                'agelast': 'Int32', 'menoage': 'Int32', 'mensage': 'Int32', 'natura': 'category', 
-                'othspe00': 'category', 'whatwas': 'category', 'med_con_sum_bl': 'category', 
-                'ad_reagan': 'category', 'mglia123_caud_vm': float, 'mglia123_it': float, 
-                'mglia123_mf': float, 'mglia123_put_p': float, 'mglia23_caud_vm': float, 'mglia23_it': float,
-                'mglia23_mf': float, 'mglia23_put_p': float, 'mglia3_caud_vm': float, 'mglia3_it': float,
-                'mglia3_mf': float, 'mglia3_put_p': float, 'tdp_st4': 'category', 'cog_res_age12': float,
-                'cog_res_age40': float, 'tot_cog_res': float, 'early_hh_ses': float, 'income_bl': 'Int32',
-                'ladder_composite': float, 'mateduc': 'Int32', 'pareduc': float, 'pateduc': 'Int32',
-                'q40inc': 'Int32'})\
-        .apply(lambda col: col.replace({' ': pd.NA, 'NA': pd.NA, '<NA>': pd.NA, 'nan': pd.NA}))\
-        .pipe(lambda df: pd.concat([df, pd.get_dummies(df['cell_type'])
-                                    .groupby(df['projid']).transform('sum').add_suffix('_num').astype('Int64')], axis=1))
         
 if not os.path.exists(f'pseudobulk/p400-broad.h5ad'):
-    with Timer(f'[p400] Pseudobulking and saving'):
-            pseudobulk = get_pseudobulk(data, 'projid', 'broad_cell_type', return_anndata=True)
-            pseudobulk.write(f'pseudobulk/p400-broad.h5ad')
+    with Timer('[p400] Pseudobulking'):
+        pseudobulk = get_pseudobulk(data, 'projid', 'broad_cell_type', return_anndata=True)
+    with Timer('[p400] Joining with external metadata'):
+        # for dataset_978_basic, check that all duplicate projids have the same metadata
+        assert not any(pd.read_csv('single-cell/p400/dataset_978_basic_04-21-2023.csv')\
+                        [lambda df: df.duplicated('projid', keep=False)]\
+                        .groupby('projid').apply(lambda x: x.nunique() > 1).sum(axis=1) > 0)
+        rosmaster = pd.read_csv('single-cell/p400/rosmaster.csv')
+        dataset_978_basic = pd.read_csv('single-cell/p400/dataset_978_basic_04-21-2023.csv')
+        drop_cols = set(pseudobulk.obs.columns) - {'projid'}
+        rosmaster = pd.read_csv('single-cell/p400/rosmaster.csv')\
+                    .drop(columns=drop_cols.intersection(set(rosmaster.columns)), errors='ignore')\
+                    .drop(columns=set(rosmaster.columns).intersection(dataset_978_basic.columns) - {'projid'}, errors='ignore')
+        dataset_978_basic = pd.read_csv('single-cell/p400/dataset_978_basic_04-21-2023.csv')\
+                            .drop_duplicates(subset='projid')\
+                            .drop(columns=drop_cols.intersection(set(dataset_978_basic.columns)), errors='ignore')\
+                            .drop(columns=set(dataset_978_basic.columns).intersection(rosmaster.columns) - {'projid'}, errors='ignore')
+        cell_type_labels = pd.concat([pd.read_table('single-cell/p400/Glut_cell_type_labels.tsv', index_col=0),
+                                    pd.read_table('single-cell/p400/GABA_cell_type_labels.tsv', index_col=0)], axis=0)\
+                            .query('study_name == "p400"')
+        pseudobulk.obs = pseudobulk.obs\
+            .reset_index()\
+            .merge(cell_type_labels['cell_type'], left_on='index', right_index=True, how='left')\
+            .assign(cell_type=lambda df: df['cell_type'].fillna(df['broad_cell_type']).astype('category'))\
+            .merge(rosmaster, on='projid', how='left')\
+            .merge(dataset_978_basic, on='projid', how='left')\
+            .dropna(axis=1, how='all')\
+            .set_index('index')\
+            .convert_dtypes()\
+            .pipe(lambda df: df.assign(**{col: df[col].astype('float64') for col in df.columns if df[col].dtype == "Float64"}))\
+            .pipe(lambda df: df.assign(**{col: df[col].astype('object') for col in df.columns if df[col].dtype == "string"}))\
+            .pipe(lambda df: df.assign(**{col: pd.Categorical(df[col].astype('Int32'), ordered=True)
+                for col in ['braaksc', 'ceradsc', 'niareagansc', 'cogdx', 'dlbdx', 'arteriol_scler',
+                            'caa_4gp', 'cvda_4gp2', 'tomm40_hap', 'tdp_st4']}))\
+            .apply(lambda col: col.replace({' ': pd.NA, 'NA': pd.NA, '<NA>': pd.NA, 'nan': pd.NA}))\
+            .pipe(lambda df: pd.concat([df, pd.get_dummies(df['cell_type'])
+                                        .groupby(df['projid']).transform('sum').add_suffix('_num').astype('Int64')], axis=1))
+    print('[p400] Saving...')
+    pseudobulk.write(f'pseudobulk/p400-broad.h5ad')    
 
 ################################################################################
 # Load Parkinson's data (10 PD/LBD individuals and 8 neurotypical controls)
@@ -215,7 +192,7 @@ if os.path.exists(PD_data_file):
     with Timer('Loading PD data'):
         PD_data = sc.read(PD_data_file)
 else:
-    print('Preprocessing PD data...')
+    print('Preprocessing PD data')
     from scipy.io import mmread  # could also use sc.read_10x_mtx()
     PD_counts = mmread('Macosko/Homo_matrix.mtx.gz').T.tocsr().astype(np.int32)
     PD_genes = pd.read_table('Macosko/Homo_features.tsv.gz', usecols=[0],
@@ -270,7 +247,7 @@ if os.path.exists(SCZ_data_file):
     with Timer('Loading SCZ data'):
         SCZ_data = sc.read(SCZ_data_file)
 else:
-    print('Preprocessing SCZ data...')
+    print('Preprocessing SCZ data')
     from rpy2.robjects import r
     from utils import r2py
     SCZ_data = sc.read('SZBDMulticohort/combinedCells_ACTIONet.h5ad')
@@ -327,7 +304,7 @@ if os.path.exists(MDD_data_file):
     with Timer('Loading MDD data'):
         MDD_data = sc.read(MDD_data_file)
 else:
-    print('Preprocessing MDD data...')
+    print('Preprocessing MDD data')
     from scipy.io import mmread  # could also use sc.read_10x_mtx()
     MDD_counts = mmread('single-cell/Maitra/matrix.mtx.gz').T.tocsr().astype(np.int32)
     MDD_genes = pd.read_table('single-cell/Maitra/features.tsv.gz', usecols=[0], index_col=0,
