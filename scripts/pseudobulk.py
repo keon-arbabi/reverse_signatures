@@ -2,7 +2,8 @@ import anndata as ad, numpy as np, pandas as pd, scanpy as sc, sys, os, gc, warn
 sys.path.append(os.path.expanduser('~wainberg'))
 from utils import Timer, get_pseudobulk
 warnings.filterwarnings("ignore", category=FutureWarning)
-pd.set_option('display.max_rows', 10)
+pd.set_option('display.max_rows', 50)
+pd.set_option('display.max_columns', 50)
 os.chdir('/home/s/shreejoy/karbabi/projects/reverse_signatures/data')
 
 # Anndata format:
@@ -127,18 +128,25 @@ if not os.path.exists(f'pseudobulk/SEAAD-{region}-broad.h5ad'):
 ################################################################################
 # Load p400 Alzheimer's data
 # Documentation and data: https://www.synapse.org/#!Synapse:syn23650894
-# AnnData object provided by Vilas Menon
 ################################################################################
 
 with Timer('[p400] Loading AD data'):
     data = sc.read('single-cell/p400/p400_qced_shareable.h5ad')
+    cell_type_labels = pd.concat([pd.read_table('single-cell/p400/Glut_cell_type_labels.tsv', index_col=0),
+                                  pd.read_table('single-cell/p400/GABA_cell_type_labels.tsv', index_col=0)], axis=0)\
+                                      .query('study_name == "p400"')
     data.obs = data.obs\
-        .assign(broad_cell_type=lambda df: df.subset
-            .replace({'OPCs': 'OPC',
-                      'CUX2+': 'Excitatory', 
-                      'Astrocytes': 'Astrocyte', 
-                      'Microglia': 'Microglia-PVM',
-                      'Oligodendrocytes': 'Oligodendrocyte'}).astype('category'))
+        .assign(num_cells_total = lambda df: df.groupby('projid')['projid'].transform('size'))\
+        .assign(broad_cell_type = lambda df: df.subset
+                .replace({'OPCs': 'OPC',
+                          'CUX2+': 'Excitatory',
+                          'Astrocytes': 'Astrocyte',
+                          'Microglia': 'Microglia-PVM',
+                          'Oligodendrocytes': 'Oligodendrocyte'}).astype('category'))\
+        .merge(cell_type_labels['cell_type'], left_index=True, right_index=True, how='left')\
+        .assign(cell_type=lambda df: df['cell_type'].fillna(df['broad_cell_type']).astype('category'))\
+        .pipe(lambda df: pd.concat([df, pd.get_dummies(df['cell_type']).groupby(df['projid'])
+                                .transform('sum').add_suffix('_num').astype('Int64')], axis=1))
         
 if not os.path.exists(f'pseudobulk/p400-broad.h5ad'):
     with Timer('[p400] Pseudobulking'):
@@ -153,18 +161,15 @@ if not os.path.exists(f'pseudobulk/p400-broad.h5ad'):
         drop_cols = set(pseudobulk.obs.columns) - {'projid'}
         rosmaster = pd.read_csv('single-cell/p400/rosmaster.csv')\
                     .drop(columns=drop_cols.intersection(set(rosmaster.columns)), errors='ignore')\
-                    .drop(columns=set(rosmaster.columns).intersection(dataset_978_basic.columns) - {'projid'}, errors='ignore')
+                    .drop(columns=set(rosmaster.columns).intersection(dataset_978_basic.columns) - {'projid'}, 
+                          errors='ignore')
         dataset_978_basic = pd.read_csv('single-cell/p400/dataset_978_basic_04-21-2023.csv')\
                             .drop_duplicates(subset='projid')\
                             .drop(columns=drop_cols.intersection(set(dataset_978_basic.columns)), errors='ignore')\
-                            .drop(columns=set(dataset_978_basic.columns).intersection(rosmaster.columns) - {'projid'}, errors='ignore')
-        cell_type_labels = pd.concat([pd.read_table('single-cell/p400/Glut_cell_type_labels.tsv', index_col=0),
-                                    pd.read_table('single-cell/p400/GABA_cell_type_labels.tsv', index_col=0)], axis=0)\
-                            .query('study_name == "p400"')
+                            .drop(columns=set(dataset_978_basic.columns).intersection(rosmaster.columns) - {'projid'}, 
+                                  errors='ignore')
         pseudobulk.obs = pseudobulk.obs\
             .reset_index()\
-            .merge(cell_type_labels['cell_type'], left_on='index', right_index=True, how='left')\
-            .assign(cell_type=lambda df: df['cell_type'].fillna(df['broad_cell_type']).astype('category'))\
             .merge(rosmaster, on='projid', how='left')\
             .merge(dataset_978_basic, on='projid', how='left')\
             .dropna(axis=1, how='all')\
@@ -172,12 +177,12 @@ if not os.path.exists(f'pseudobulk/p400-broad.h5ad'):
             .convert_dtypes()\
             .pipe(lambda df: df.assign(**{col: df[col].astype('float64') for col in df.columns if df[col].dtype == "Float64"}))\
             .pipe(lambda df: df.assign(**{col: df[col].astype('object') for col in df.columns if df[col].dtype == "string"}))\
+            .pipe(lambda df: df.assign(**{col: df[col].map({v: k for k, v in enumerate(sorted(df[col].unique(), reverse=True), 1)})
+                for col in ['ceradsc', 'niareagansc']}))\
             .pipe(lambda df: df.assign(**{col: pd.Categorical(df[col].astype('Int32'), ordered=True)
                 for col in ['braaksc', 'ceradsc', 'niareagansc', 'cogdx', 'dlbdx', 'arteriol_scler',
                             'caa_4gp', 'cvda_4gp2', 'tomm40_hap', 'tdp_st4']}))\
-            .apply(lambda col: col.replace({' ': pd.NA, 'NA': pd.NA, '<NA>': pd.NA, 'nan': pd.NA}))\
-            .pipe(lambda df: pd.concat([df, pd.get_dummies(df['cell_type'])
-                                        .groupby(df['projid']).transform('sum').add_suffix('_num').astype('Int64')], axis=1))
+            .apply(lambda col: col.replace({' ': pd.NA, 'NA': pd.NA, '<NA>': pd.NA, 'nan': pd.NA}))
     print('[p400] Saving...')
     pseudobulk.write(f'pseudobulk/p400-broad.h5ad')    
 

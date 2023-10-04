@@ -230,6 +230,7 @@ for study_name in [study_names]:
             ss_total = (len(continuous) - 1) * np.var(continuous, ddof=1)
             return ss_between / ss_total
         
+        # TODO just make everything pearson, hot-one-encode unordered categories 
         def calculate_associations(H, meta, absolute_R=True):
             # encoding categorical and boolean columns to integers
             meta = meta.apply(lambda x: x.cat.codes if x.dtype.name == 'category' else x)
