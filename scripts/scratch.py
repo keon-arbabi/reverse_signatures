@@ -6,8 +6,8 @@ import os
 from scipy.stats import pearsonr
 os.chdir('/home/s/shreejoy/karbabi/projects/reverse_signatures')
 
-pd.set_option('display.max_rows', 50)
-pd.set_option('display.max_columns', 50)
+pd.set_option('display.max_rows', None)
+pd.set_option('display.max_columns', None)
 
 df = sc.read('data/pseudobulk/SEAAD-DLPFC-broad.h5ad')
 #df = sc.read('data/pseudobulk/p400-broad.h5ad').obs
