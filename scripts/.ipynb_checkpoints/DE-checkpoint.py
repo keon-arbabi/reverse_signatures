@@ -1,11 +1,11 @@
 import numpy as np, pandas as pd, scanpy as sc, warnings, os, sys
 from functools import reduce
+from itertools import combinations, product
 from rpy2.robjects import Formula, r
-from scipy.stats import combine_pvalues
+from scipy.stats import pearsonr, combine_pvalues
 sys.path.append('projects/reverse_signatures/scripts')
-from utils import series_to_rvector, df_to_rdf, df_to_rmatrix,\
+from utils import array_to_rvector, series_to_rvector, df_to_rdf, df_to_rmatrix,\
     rmatrix_to_df, rdf_to_df, bonferroni, fdr, percentile_transform, Timer
-    
 warnings.filterwarnings("ignore", category=FutureWarning)
 pd.set_option('display.max_rows', 10)
 os.chdir('/home/s/shreejoy/karbabi/projects/reverse_signatures/')
@@ -24,13 +24,12 @@ pseudobulk_files = {'SEAAD-MTG': 'data/pseudobulk/SEAAD-MTG-broad.h5ad',
 pseudobulks = {trait: sc.read(pseudobulk_file)
                for trait, pseudobulk_file in pseudobulk_files.items()}
 
-# Note: num_cells is the number of cells for that broad_cell_type per subject 
 for trait, pseudobulk in pseudobulks.items():
     library_sizes = pseudobulk.X.sum(axis=1)
     assert not np.any(library_sizes == 0), f'{trait} has libraries with no counts'
     pseudobulk.obs['library_size'] = library_sizes
-    pseudobulk.obs['log_library_size'] = np.log2(pseudobulk.obs['library_size'])    
-    pseudobulk.obs['log_num_cells'] = np.log2(pseudobulk.obs['num_cells'] + 1)
+    pseudobulk.obs['log_library_size'] = np.log2(pseudobulk.obs['library_size'])
+    pseudobulk.obs['log_num_cells'] = np.log2(pseudobulk.obs['num_cells'])
 
 for trait, pseudobulk in pseudobulks.items():
     if 'SEAAD' in trait:
@@ -60,7 +59,7 @@ control_name = {'SEAAD-MTG': 0, 'SEAAD-DLPFC': 0, 'p400': 0}
 for trait, pseudobulk in pseudobulks.items():
     for col in ['Dx'] + covariate_columns[trait]:
         assert not pseudobulk.obs[col].isna().any(), f"'{col}' in {trait} has NaNs"
-            
+
 ################################################################################
 # Preprocess
 ################################################################################
@@ -79,7 +78,7 @@ assert (sample_sizes := get_sample_sizes(pseudobulks)) ==\
 assert (number_of_genes := get_number_of_genes(pseudobulks)) == \
     {'SEAAD-MTG': 36517, 'SEAAD-DLPFC': 36517, 'p400': 18552}, number_of_genes
     
-# Filter to coding genes present in all three datasets
+# filter to coding genes present in all three datasets
 
 coding_genes = pd.read_table('data/differential-expression/coding_genes_hg38_gencode_v44.bed',
                              header=None, usecols=[0, 3], names=['chrom', 'gene'],
@@ -101,7 +100,7 @@ assert (number_of_genes := get_number_of_genes(pseudobulks)) == \
 for trait, dataset in pseudobulks.items():
     assert dataset.var.index.equals(genes_in_common)
 
-# Stratify by cell type
+# stratify by cell type: 7 major cell types
 
 broad_cell_types = 'Excitatory', 'Inhibitory', 'Oligodendrocyte', 'Astrocyte',\
     'Microglia-PVM', 'OPC', 'Endothelial'
@@ -110,9 +109,9 @@ cell_type_pseudobulks = {(trait, cell_type):
         for trait, dataset in pseudobulks.items()
         for cell_type in broad_cell_types}
     
-# For each cell type, filter to:
-# - Genes with at least 1 count in 80% of controls OR cases in all studies
-# - Subjects with at least 10 cells of that type
+# for each cell type, filter to:
+# - genes with at least 1 count in 80% of controls OR cases in all studies
+# - people with at least 10 cells of that type
 
 sufficiently_expressed_genes = {
     cell_type: reduce(pd.Index.intersection, (
@@ -140,7 +139,7 @@ filtered_pseudobulks = {(trait, cell_type):
 # - Some covariates (like which brain region the samples came from) may be the
 #   same for all samples from a given cell type; remove them for that cell type
 ################################################################################
-            
+
 normalized_count_matrices, design_matrices, group_vectors = {}, {}, {}
 for (trait, cell_type), dataset in filtered_pseudobulks.items():
     with Timer(f'[{trait}, {cell_type}] '
@@ -151,13 +150,17 @@ for (trait, cell_type), dataset in filtered_pseudobulks.items():
                 .replace({False: 'Case', True: 'Control'})
                 .astype(pd.CategoricalDtype(['Control', 'Case'])))\
             [['diagnosis'] + covariate_columns[trait]]
-        assert not diagnosis_and_covariate_matrix.isna().any().any(),\
-            "NAs detected in diagnosis and covariate matrix"
+        valid_indices = diagnosis_and_covariate_matrix.dropna().index
+        if len(dataset.obs) - len(valid_indices) > 3:
+            raise ValueError(">3 rows with NAs detected")
         count_matrix = df_to_rmatrix(pd.DataFrame(
-            dataset.X.T, index=dataset.var.index, columns=dataset.obs.index))
+            dataset.X.T[:, dataset.obs.index.get_indexer(valid_indices)],
+            index=dataset.var.index, columns=valid_indices))
         group_vectors[trait, cell_type] = diagnosis_and_covariate_matrix['diagnosis']\
+            .loc[valid_indices]\
             .pipe(series_to_rvector)
         diagnosis_and_covariate_matrix = diagnosis_and_covariate_matrix\
+            .loc[valid_indices]\
             .pipe(lambda df: df.loc[:, df.nunique() > 1])\
             .pipe(df_to_rdf)
         design_matrices[trait, cell_type] = r['model.matrix'](
@@ -175,10 +178,9 @@ for (trait, cell_type), dataset in filtered_pseudobulks.items():
 
 def aggregate(DEs):
     return pd.concat([DEs[trait, cell_type]
-                      .assign(trait=trait, 
-                              cell_type=cell_type,
-                              bonferroni=lambda df: bonferroni(df.p),
-                              fdr=lambda df: fdr(df.p))
+                      .assign(trait=trait, cell_type=cell_type,
+                             bonferroni=lambda df: bonferroni(df.p),
+                             fdr=lambda df: fdr(df.p))
                       for trait, cell_type in DEs])\
         .reset_index()\
         .set_index(['trait', 'cell_type', 'gene'])
@@ -256,6 +258,7 @@ DE_limma_voom_combined = DE_limma_voom\
     .assign(fdr=lambda df: fdr(df['p']))
 DE_limma_voom_combined.to_csv('results/voom/limma_voom_combined.tsv', sep='\t')
 
+# TODO: why are there more FDR hits after combining p values than before 
 print(DE_limma_voom_combined[DE_limma_voom_combined['fdr'] < 0.01]\
     .groupby('cell_type')['gene'].nunique())
 

@@ -37,11 +37,12 @@ def preprocess_data(study_name, cell_type, gene_selection='deg'):
         degs = degs['gene'].astype(str).tolist()
         data = data[:, data.var_names.isin(degs)].copy()
     if 'SEAAD' in study_name:
-        case_samples = (data.obs['Consensus Clinical Dx (choice=Alzheimers disease)'].eq('Checked')) & \
-                    (data.obs['ACT'] | data.obs['ADRC Clinical Core'])
+        case_samples = \
+            np.where(data.obs['Consensus Clinical Dx (choice=Alzheimers disease)'].eq('Checked'), True,
+            np.where(data.obs['Consensus Clinical Dx (choice=Control)'].eq('Checked'), False, False))
         data = data[case_samples, :].copy()
     elif study_name == 'p400':
-        case_samples = data.obs['cogdx'].isin([4, 5])
+        case_samples = data.obs['pmAD'].eq(1)
         data = data[case_samples, :].copy()
     data.X = np.log1p(data.X * (1000000 / data.X.sum(axis=1))[:, None])
     data.X *= 1 / np.log(2)
@@ -232,8 +233,8 @@ def get_metadata(study_name, H_index):
         cols.extend(['Lamp5_num', 'Lamp5 Lhx6_num', 'Pax6_num', 'Pvalb_num', 'Sncg_num',
                      'Sst_num', 'Sst Chodl_num', 'Vip_num'])
     meta = adata.obs[cols].loc[H_index]
-    meta_transformed = meta.apply(lambda col: col.astype('category').cat.codes if col.dtype.name == 'category' \
-                                  else col.astype(int) if col.dtype == bool \
+    meta_transformed = meta.apply(lambda col: col.astype('category').cat.codes if col.dtype.name == 'category'
+                                  else col.astype(int) if col.dtype == bool
                                   else col).astype(float).apply(lambda col: col.fillna(col.median()))
     return meta_transformed
 
