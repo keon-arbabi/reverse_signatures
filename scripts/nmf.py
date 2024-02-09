@@ -7,7 +7,7 @@ from scipy.spatial.distance import pdist
 from scipy.cluster.hierarchy import linkage, leaves_list
 
 sys.path.append('projects/reverse_signatures/scripts')
-from utils import Timer, rmatrix_to_df, array_to_rmatrix, rdf_to_df
+from projects.reverse_signatures.old.utils import Timer, rmatrix_to_df, array_to_rmatrix, df_to_rdf, rdf_to_df, index_to_rvector
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 os.chdir('/home/s/shreejoy/karbabi/projects/reverse_signatures')
@@ -19,31 +19,35 @@ r.library('RcppML', quietly=True)
 
 broad_cell_types = 'Excitatory', 'Inhibitory', 'Oligodendrocyte', 'Astrocyte',\
     'Microglia-PVM', 'OPC', 'Endothelial'
-study_names = 'SEAAD-MTG', 'SEAAD-DLPFC', 'p400'
+study_names = ['p400']
+#'SEAAD-MTG', 'SEAAD-DLPFC'
 
-k_max = 20
+k_max = 30
 n_trials = 20
-save_name = 'DEG_L1_fdr01'
+save_name = ''
 
-def preprocess_data(study_name, cell_type, gene_selection='deg'):
+def preprocess_data(study_name, cell_type, gene_selection='deg', threshold=0.05, filt_cases=True):
     data = sc.read(f'data/pseudobulk/{study_name}-broad.h5ad')
     data = data[data.obs['broad_cell_type'] == cell_type, :]
-    if gene_selection == 'hvg':
-        hvg = np.argpartition(-np.var(data.X, axis=0), 2000)[:2000]
-        data = data[:, hvg].copy()
-    elif gene_selection == 'deg':
-        degs = pd.read_csv('results/voom/limma_voom_combined.tsv', sep='\t')\
-            .query('cell_type == @cell_type & fdr < 0.01')
-        degs = degs['gene'].astype(str).tolist()
-        data = data[:, data.var_names.isin(degs)].copy()
-    if 'SEAAD' in study_name:
+    if 'SEAAD' in study_name and filt_cases:
         case_samples = \
             np.where(data.obs['Consensus Clinical Dx (choice=Alzheimers disease)'].eq('Checked'), True,
             np.where(data.obs['Consensus Clinical Dx (choice=Control)'].eq('Checked'), False, False))
         data = data[case_samples, :].copy()
-    elif study_name == 'p400':
-        case_samples = data.obs['pmAD'].eq(1)
+    elif study_name == 'p400' and filt_cases:
+        case_samples = data.obs['pmAD'].eq(1).fillna(False).to_numpy(dtype=bool)
         data = data[case_samples, :].copy()
+    if gene_selection == 'hvg':
+        hvg = np.argpartition(-np.var(data.X, axis=0), 2000)[:2000]
+        data = data[:, hvg].copy()
+    elif gene_selection == 'deg':
+        # degs = pd.read_csv('results/voom/limma_voom_combined.tsv.gz', sep='\t')\
+        #     .query('cell_type == @cell_type & fdr < @threshold')
+        degs = pd.read_csv('results/voom/limma_voom.tsv.gz', sep='\t')\
+             .query('trait == @study_name & cell_type == @cell_type & fdr < @threshold')
+        degs = degs['gene'].astype(str).tolist()
+        print(f'[{study_name} {cell_type}]: {len(degs)}')
+        data = data[:, data.var_names.isin(degs)].copy()
     data.X = np.log1p(data.X * (1000000 / data.X.sum(axis=1))[:, None])
     data.X *= 1 / np.log(2)
     assert not np.any(data.X < 0), "Array contains negative numbers"
@@ -144,6 +148,305 @@ for study_name in study_names:
 # Examine signatures 
 ################################################################################
 
+broad_cell_types = 'Excitatory', 'Inhibitory', 'Oligodendrocyte', 'Astrocyte'
+study_name = 'p400'
+ 
+for cell_type in broad_cell_types:
+    pseudobulk = preprocess_data(study_name, cell_type, gene_selection='deg', threshold=0.05, filt_cases=True)
+    genes = index_to_rvector(pseudobulk.var_names)
+    samps = index_to_rvector(pseudobulk.obs_names)
+    mat = pseudobulk.X.T
+    mat = mat / np.median(mat, axis=1)[:, None]
+    mat = array_to_rmatrix(mat)
+    W = pd.read_table(f'results/NMF/{study_name}-{cell_type}_W_{save_name}.tsv', index_col=0)\
+        .pipe(df_to_rdf)
+    H = pd.read_table(f'results/NMF/{study_name}-{cell_type}_H_{save_name}.tsv', index_col=0)\
+        .pipe(df_to_rdf)
+        
+    if 'SEAAD' in study_name:
+        cols = ['ADNC', 'Braak stage', 'Thal phase', 'Last CASI Score',
+                'CERAD score', 'LATE-NC stage', 'Atherosclerosis', 'Arteriolosclerosis',
+                'Lewy body disease pathology', 'Microinfarct pathology',
+                'Continuous Pseudo-progression Score', 'APOE4 status', 'ACT',
+                'ADRC Clinical Core', 'Age at Death', 'Age of onset cognitive symptoms',
+                'Age of Dementia diagnosis', 'Sex', 'PMI', 'Brain pH', 'RIN',
+                'Fresh Brain Weight', 'Years of education', 'self_reported_ethnicity']
+    if study_name == 'p400':
+        cols = ['ad_reagan', 'age_death', 'age_first_ad_dx', 'amyloid', 'apoe_genotype',
+                'arteriol_scler', 'braaksc', 'caa_4gp', 'cancer_bl', 'ceradsc',
+                'chd_cogact_freq', 'ci_num2_gct', 'ci_num2_mct', 'cog_res_age12',
+                'cog_res_age40', 'cogdx', 'cogdx_stroke', 'cogn_global_random_slope',
+                'cvda_4gp2', 'dlbdx', 'dxpark', 'educ', 'gpath', 'headinjrloc_bl',
+                'ldai_bl', 'med_con_sum_bl', 'msex', 'nft', 'niareagansc', 'plaq_d',
+                'plaq_n', 'pmi', 'race7', 'smoking', 'tangles', 'tdp_st4', 'thyroid_bl',
+                'tomm40_hap', 'tot_cog_res']
+    cols.extend(['L2/3 IT_num', 'L4 IT_num', 'L5 ET_num', 'L5 IT_num',
+                'L5/6 NP_num', 'L6 CT_num', 'L6 IT_num', 'L6 IT Car3_num', 'L6b_num'])
+    cols.extend(['Lamp5_num', 'Lamp5 Lhx6_num', 'Pax6_num', 'Pvalb_num', 'Sncg_num',
+                    'Sst_num', 'Sst Chodl_num', 'Vip_num'])
+    meta = pseudobulk.obs[cols].pipe(df_to_rdf)
+    os.makedirs('results/explore/p400_cases', exist_ok=True)
+
+    r('''
+        function(study_name, cell_type, genes, samps, mat, W, H, meta) {
+        suppressPackageStartupMessages({
+            library(ComplexHeatmap)
+            library(circlize)
+            library(seriation)
+        })
+        rownames(mat) = genes
+        colnames(mat) = samps
+        o1 = seriation::seriate(dist(mat), method = "OLO")
+        o2 = seriation::seriate(dist(t(mat)), method = "OLO")
+        ht = HeatmapAnnotation(df = meta,
+                                simple_anno_size = unit(0.15, "cm"),
+                                annotation_name_gp = gpar(fontsize = 5),
+                                show_legend = FALSE)     
+        hb = HeatmapAnnotation(df = H,
+                    simple_anno_size = unit(0.3, "cm"),
+                    annotation_name_gp = gpar(fontsize = 8),
+                    show_legend = FALSE)         
+        hr = rowAnnotation(df = W,
+                            simple_anno_size = unit(0.3, "cm"),
+                            annotation_name_gp = gpar(fontsize = 8),
+                            show_legend = FALSE)
+
+        #col_fun = colorRamp2(range(mat), hcl_palette = "Batlow", reverse = TRUE)
+        col_fun = colorRamp2(quantile(mat, probs = c(0.01, 0.99)), hcl_palette = "Batlow", reverse = TRUE)
+
+        file_name = paste0("results/explore/p400_cases/", cell_type, "trimc_scaled.png")
+        png(file = file_name, width=7, height=10, units="in", res=1200)
+        h = Heatmap(
+            mat,
+            row_order = seriation::get_order(o1),
+            column_order = seriation::get_order(o2),
+            show_row_names = FALSE,
+            show_column_names = FALSE,
+            bottom_annotation = hb,
+            top_annotation = ht,
+            left_annotation = hr,
+            col = col_fun,
+            name = paste0(study_name, "\n", cell_type),
+            show_heatmap_legend = TRUE
+        )
+        draw(h)
+        dev.off()
+        }
+        ''')(study_name, cell_type, genes, samps, mat, W, H, meta)
+
+
+
+
+
+
+
+
+
+
+
+
+for cell_type in broad_cell_types:
+    pseudobulk = preprocess_data(study_name, cell_type, gene_selection='deg', threshold=0.05, filt_cases=False)
+    genes = index_to_rvector(pseudobulk.var_names)
+    samps = index_to_rvector(pseudobulk.obs_names)
+    mat = pseudobulk.X.T
+    
+    W = pd.read_table(f'results/NMF/{study_name}-{cell_type}_W_{save_name}.tsv', index_col=0)\
+        .pipe(df_to_rdf)
+    H = pd.read_table(f'results/NMF/{study_name}-{cell_type}_H_{save_name}.tsv', index_col=0)
+    
+    case_samples = H.index.tolist()
+    is_case = pseudobulk.obs_names.isin(case_samples)
+    case_mat = mat[:, is_case]
+    control_mat = mat[:, ~is_case]
+    
+    median_norm = np.median(case_mat, axis=1)[:, None]
+    case_mat_normalized = case_mat / median_norm
+    control_mat_normalized = control_mat / median_norm
+    
+    case_indices = np.where(is_case)[0]
+    control_indices = np.where(~is_case)[0]
+    
+    from rpy2.robjects.vectors import IntVector
+    case_indices_r = IntVector(case_indices+1)
+    control_indices_r = IntVector(control_indices+1)
+        
+    case_mat_r = array_to_rmatrix(case_mat_normalized)
+    control_mat_r = array_to_rmatrix(control_mat_normalized)
+    
+    cols = ['ad_reagan', 'age_death', 'age_first_ad_dx', 'amyloid', 'apoe_genotype',
+        'arteriol_scler', 'braaksc', 'caa_4gp', 'cancer_bl', 'ceradsc',
+        'chd_cogact_freq', 'ci_num2_gct', 'ci_num2_mct', 'cog_res_age12',
+        'cog_res_age40', 'cogdx', 'cogdx_stroke', 'cogn_global_random_slope',
+        'cvda_4gp2', 'dlbdx', 'dxpark', 'educ', 'gpath', 'headinjrloc_bl',
+        'ldai_bl', 'med_con_sum_bl', 'msex', 'nft', 'niareagansc', 'plaq_d',
+        'plaq_n', 'pmi', 'race7', 'smoking', 'tangles', 'tdp_st4', 'thyroid_bl',
+        'tomm40_hap', 'tot_cog_res', 'pmAD']
+    cols.extend(['L2/3 IT_num', 'L4 IT_num', 'L5 ET_num', 'L5 IT_num',
+                'L5/6 NP_num', 'L6 CT_num', 'L6 IT_num', 'L6 IT Car3_num', 'L6b_num'])
+    cols.extend(['Lamp5_num', 'Lamp5 Lhx6_num', 'Pax6_num', 'Pvalb_num', 'Sncg_num',
+                    'Sst_num', 'Sst Chodl_num', 'Vip_num'])
+    meta = pseudobulk.obs[cols].pipe(df_to_rdf)
+    os.makedirs('results/explore/p400_cases_controls', exist_ok=True)
+
+    r('''
+        function(study_name, cell_type, genes, samps, case_mat_r, control_mat_r, case_indices_r, control_indices_r, W, meta) {
+            suppressPackageStartupMessages({
+                library(ComplexHeatmap)
+                library(circlize)
+                library(seriation)
+            })
+            rownames(case_mat_r) = genes
+            rownames(control_mat_r) = genes
+            
+            colnames(case_mat_r) = samps[case_indices_r] 
+            colnames(control_mat_r) = samps[control_indices_r]
+
+            o2_cases = seriation::seriate(dist(t(case_mat_r)), method = "OLO")
+            o2_controls = seriation::seriate(dist(t(control_mat_r)), method = "OLO")
+
+            combined_mat = cbind(case_mat_r, control_mat_r) 
+            o1 = seriation::seriate(dist(combined_mat), method = "OLO")
+
+            hb = HeatmapAnnotation(df = meta$pmAD,
+                simple_anno_size = unit(0.3, "cm"),
+                annotation_name_gp = gpar(fontsize = 8),
+                show_legend = FALSE)  
+            ht = HeatmapAnnotation(df = meta,
+                simple_anno_size = unit(0.15, "cm"),
+                annotation_name_gp = gpar(fontsize = 5),
+                show_legend = FALSE)       
+            hr = rowAnnotation(df = W,
+                simple_anno_size = unit(0.3, "cm"),
+                annotation_name_gp = gpar(fontsize = 8),
+                show_legend = FALSE)
+
+            col_fun = colorRamp2(range(combined_mat), hcl_palette = "Batlow", reverse = TRUE)
+            #col_fun = colorRamp2(quantile(combined_mat, probs = c(0.01, 0.99)), hcl_palette = "Batlow", reverse = TRUE)
+            file_name = paste0("results/explore/p400_cases_controls/", cell_type, "_heatmap.png")
+            
+            print(length(c(seriation::get_order(o2_cases), seriation::get_order(o2_controls))))
+            print(ncol(combined_mat))
+            
+            png(file = file_name, width=7, height=10, units="in", res=1200)
+            h = Heatmap(
+                combined_mat,
+                cluster_rows = F,
+                cluster_columns = F,
+                row_order = seriation::get_order(o1),
+                column_order = c(seriation::get_order(o2_cases), ncol(case_mat_r) + seriation::get_order(o2_controls)),
+                show_row_names = FALSE,
+                show_column_names = FALSE,
+                bottom_annotation = hb,
+                top_annotation = ht,
+                left_annotation = hr,
+                col = col_fun,
+                name = paste0(study_name, "\n", cell_type),
+                show_heatmap_legend = TRUE
+            )
+            draw(h)
+            dev.off()
+        }
+        ''')(study_name, cell_type, genes, samps, case_mat_r, control_mat_r, case_indices_r, control_indices_r, W, meta)
+
+
+
+
+
+
+
+
+case_indices = [i for i, x in enumerate(is_case) if x]
+control_indices = [i for i, x in enumerate(is_case) if not x]
+
+# Ensure they are of correct length
+print("Total number of samples:", len(samps))
+print("Number of case indices:", len(case_indices))
+print("Number of control indices:", len(control_indices))
+
+# Convert indices to R vectors
+case_indices_r = index_to_rvector(pd.Index(case_indices))
+control_indices_r = index_to_rvector(pd.Index(control_indices))
+
+
+
+
+
+
+
+
+
+import pandas as pd
+import os
+from pyComplexHeatmap import Heatmap, HeatmapAnnotation, rowAnnotation, colorRamp2
+import numpy as np
+import seriation
+
+for study_name in study_names:
+    for cell_type in broad_cell_types:
+        pseudobulk = preprocess_data(study_name, cell_type, gene_selection='deg', threshold=0.01, filt_cases=True)
+        genes = pseudobulk.var_names
+        samps = pseudobulk.obs_names
+        mat = pseudobulk.X.T
+
+        W = pd.read_table(f'results/NMF/{study_name}-{cell_type}_W_{save_name}.tsv', index_col=0)
+        H = pd.read_table(f'results/NMF/{study_name}-{cell_type}_H_{save_name}.tsv', index_col=0)
+
+        if 'SEAAD' in study_name:
+            cols = ['ADNC', 'Braak stage', 'Thal phase', 'Last CASI Score',
+                    'CERAD score', 'LATE-NC stage', 'Atherosclerosis', 'Arteriolosclerosis',
+                    'Lewy body disease pathology', 'Microinfarct pathology',
+                    'Continuous Pseudo-progression Score', 'APOE4 status', 'ACT', 
+                    'ADRC Clinical Core', 'Age at Death', 'Age of onset cognitive symptoms',
+                    'Age of Dementia diagnosis', 'Sex', 'PMI', 'Brain pH', 'RIN',
+                    'Fresh Brain Weight', 'Years of education', 'self_reported_ethnicity']
+        if study_name == 'p400':
+            cols = ['ad_reagan', 'age_death', 'age_first_ad_dx', 'amyloid', 'apoe_genotype', 
+                    'arteriol_scler', 'braaksc', 'caa_4gp', 'cancer_bl', 'ceradsc', 
+                    'chd_cogact_freq', 'ci_num2_gct', 'ci_num2_mct', 'cog_res_age12', 
+                    'cog_res_age40', 'cogdx', 'cogdx_stroke', 'cogn_global_random_slope', 
+                    'cvda_4gp2', 'dlbdx', 'dxpark', 'educ', 'gpath', 'headinjrloc_bl', 
+                    'ldai_bl',  'med_con_sum_bl', 'msex', 'nft', 'niareagansc', 'plaq_d',
+                    'plaq_n', 'pmi', 'race7', 'smoking', 'tangles',  'tdp_st4', 'thyroid_bl',
+                    'tomm40_hap', 'tot_cog_res']
+        cols.extend(['L2/3 IT_num', 'L4 IT_num', 'L5 ET_num', 'L5 IT_num',
+                    'L5/6 NP_num', 'L6 CT_num', 'L6 IT_num', 'L6 IT Car3_num', 'L6b_num'])
+        cols.extend(['Lamp5_num', 'Lamp5 Lhx6_num', 'Pax6_num', 'Pvalb_num', 'Sncg_num',
+                     'Sst_num', 'Sst Chodl_num', 'Vip_num'])
+
+        meta = pseudobulk.obs[cols]
+        os.makedirs('results/explore', exist_ok=True)
+
+        o1 = seriation.seriate(np.array(mat), method="OLO")
+        o2 = seriation.seriate(np.array(mat.T), method="OLO")
+
+        ht = HeatmapAnnotation(df=meta)
+        hb = HeatmapAnnotation(df=H)
+        hr = rowAnnotation(df=W)
+
+        col_fun = colorRamp2(np.linspace(np.min(mat), np.max(mat), num=256), 'Batlow', reverse=True)
+
+        file_name = f"results/explore/{study_name}_{cell_type}_fdr01.png"
+        hm = Heatmap(
+            mat,
+            row_order=o1,
+            column_order=o2,
+            bottom_annotation=hb,
+            top_annotation=ht,
+            left_annotation=hr,
+            col=col_fun,
+            name=f"{study_name}\n{cell_type}"
+        )
+        hm.save(file_name, dpi=1200, width=7, height=10)
+
+
+
+
+
+
+
+
+
 def plot_heatmap(ax, data, color='viridis', yticks=1, xticks=1, square=False, col_order=None):
     data = data.iloc[:, col_order] if col_order is not None else data
     sns.heatmap(data, ax=ax, cmap=color, cbar_kws={'shrink': 0.5}, 
@@ -219,15 +522,15 @@ def get_metadata(study_name, H_index):
     if study_name == 'p400':
         cols = ['ad_reagan', 'age_death', 'age_first_ad_dx', 'amyloid', 'apoe_genotype', 
                 'arteriol_scler', 'braaksc', 'caa_4gp', 'cancer_bl', 'ceradsc', 
-                'chd_cogact_freq', 'ci_num2_gct', 'ci_num2_mct', 'cog_res_age12', 'cog_res_age40', 
-                'cogdx', 'cogdx_stroke', 'cogn_global_random_slope', 'cvda_4gp2', 
-                'dlbdx', 'dxpark', 'educ', 'gpath', 'headinjrloc_bl', 
+                'chd_cogact_freq', 'ci_num2_gct', 'ci_num2_mct', 'cog_res_age12', 
+                'cog_res_age40', 'cogdx', 'cogdx_stroke', 'cogn_global_random_slope', 
+                'cvda_4gp2', 'dlbdx', 'dxpark', 'educ', 'gpath', 'headinjrloc_bl', 
                 'ldai_bl', 'mglia123_caud_vm', 'mglia123_it', 'mglia123_mf', 'mglia123_put_p', 
                 'mglia23_caud_vm', 'mglia23_it', 'mglia23_mf', 'mglia23_put_p', 'mglia3_caud_vm', 
                 'mglia3_it', 'mglia3_mf', 'mglia3_put_p', 'med_con_sum_bl', 'msex', 
-                'nft', 'niareagansc', 'plaq_d', 'plaq_n', 'pmi', 
-                'race7', 'smoking', 'tangles', 'tdp_st4', 'thyroid_bl', 
-                'tomm40_hap', 'tot_cog_res']
+                'nft', 'niareagansc', 'plaq_d', 'plaq_n', 'pmi', 'race7', 'smoking', 'tangles', 
+                'tdp_st4', 'thyroid_bl', 'tomm40_hap', 'tot_cog_res']
+        
         cols.extend(['L2/3 IT_num', 'L4 IT_num', 'L5 ET_num', 'L5 IT_num',
                     'L5/6 NP_num', 'L6 CT_num', 'L6 IT_num', 'L6 IT Car3_num', 'L6b_num'])
         cols.extend(['Lamp5_num', 'Lamp5 Lhx6_num', 'Pax6_num', 'Pvalb_num', 'Sncg_num',
@@ -280,7 +583,7 @@ for study_name in study_names:
 
 
 
-save_name = 'DEG_L1_fdr01'
+save_name = ''
     
 def plot_heatmap(data, color='viridis', title='', yticks=1, xticks=1, square=False, optimal_ordering=True, figsize=None):
     if figsize: plt.figure(figsize=figsize)
@@ -320,10 +623,10 @@ for study_name in study_names:
         os.makedirs('results/basis', exist_ok=True)
         os.makedirs('results/coefficient', exist_ok=True)
         
-        # plot_heatmap(W, color='rocket', yticks=False, optimal_ordering=True, figsize=(6,7),
-        #              title=f'Basis Vectors W (Metagenes), {study_name}-{cell_type}')
-        # plt.savefig(f'results/basis/{study_name}-{cell_type}_heatmap.png', dpi=400)
-        # plt.clf()
+        plot_heatmap(W, color='rocket', yticks=False, optimal_ordering=True, figsize=(6,7),
+                     title=f'Basis Vectors W (Metagenes), {study_name}-{cell_type}')
+        plt.savefig(f'results/basis/{study_name}-{cell_type}_heatmap.png', dpi=400)
+        plt.clf()
 
         plot_heatmap(H.T, color='rocket', xticks=False, optimal_ordering=True, figsize=(8,4),
                      title=f'Coefficient Matrix H (Metasamples), {study_name}-{cell_type}')
@@ -380,172 +683,6 @@ def peek_metagenes(study_name, cell_type):
 for cell_type in broad_cell_types:
     print(cell_type)
     peek_metagenes('p400', cell_type)
-
-'''
-Excitatory
-   Metagene 1 Metagene 2 Metagene 3 Metagene 4 Metagene 5 Metagene 6 Metagene 7
-0        SYT1      WDR64   PDCD1LG2       GLUL       GLUL       SPP1     MS4A13
-1       LSAMP    HSD11B2       PSG8       SPP1       SPP1       GLUL      WDR64
-2       RALYL       GLUL      PAPPA       TPM2       SCGN       KRT5      SPON2
-3       NEGR1     ITGA10     PCDH12      SPON2   SLC25A18     PHLDA2      MS4A8
-4       FGF14       SPP1        TYR        MAF        MAF       PKP1      ITGA4
-5       KCNQ5   SLC25A18      CHST9   SLC25A18      GRIP2     CARTPT     CARTPT
-6       SNTG1       OIT3     SCUBE3       TGFA    SLC14A1       PDYN      BATF3
-7        RYR2     SFT2D2       PSG9      ITGA4       TPM2      PRELP     TRIM73
-8       RIMS2      MAML2     CELA2B      BATF3      WDR64       CHGA      ARAP3
-9      ADGRL3       TPM2    ANKRD53     CELA2B    HSD11B2      MAP1A      PRTN3
-10    KHDRBS2      CASP6     CYP3A4      MS4A8        SLA     NT5DC2      IFT27
-11      LRRC7    ADAMTS2      TRPA1       ETV4       PKP1     CLDND2       RRM2
-12     PPP3CA       CUBN    SLC28A2     SFT2D2  MAP1LC3B2      GPR26       MYH7
-13     SLC8A1       MYH7      MEOX1      WDR64      CASP6       CCNO      RERGL
-14      CNTN1    CCDC178    SLC22A6     SCUBE3        RGR       SCGN        PGC
-15      PTPRK      ITGA4    SLC22A8     PCDH12       PRLR      ATOX1      NPHS1
-16      NELL2       PDYN    DGAT2L6      RERGL       TGFA       MYH7     KLHL35
-17      NCAM2     CELA2B      PSG11     TRIM73       SYT6     PLCXD2    HSD11B2
-18      PCDH7     PCDH12        PLG       TNS3      ARAP3     ATP5PD       CPT2
-19       PCLO      OVCH1      HIPK4    SLC14A1       CUBN       SYN1      TNNC2
-Inhibitory
-   Metagene 1 Metagene 2 Metagene 3 Metagene 4 Metagene 5
-0     CNTNAP2      HIPK4       SPP1       SPP1       SPP1
-1       ERBB4      FUCA2       POLQ       TPBG       SRPX
-2       CADM2       PSG8      FUCA2      PDZD4      LAMB4
-3       CSMD1     CELA2B       SRPX      CCND1       SMTN
-4        NRG3       POLQ     PCDH12     BOLA2B      FUCA2
-5       LSAMP      ARAP3      HIPK4     SYCE1L       OIT3
-6      ADGRB3      RGPD1     CELA2B       TPM2       VASP
-7        DLG2     MS4A13      RGPD1     HAPLN2       TCN2
-8    IL1RAPL1    SLC28A2    RANBP3L      ATOX1      WDR86
-9        SYT1    C1QTNF7    C1QTNF7     CHCHD7        CCS
-10      PCDH9     PCDH12      PDE5A       CD83    RANBP3L
-11      GRIK2    CEACAM1      CCND1       ZPR1       TPM2
-12      CNTN5    SLC22A6      GFRAL     FN3KRP     HAPLN2
-13      PLCB1       MXD3     LRRIQ3     EIF1AD      REP15
-14      MAGI2       ETV4     ALOX12       NEFH       MXD3
-15      NLGN1       MYOT      LAMB4      APOA1       TPBG
-16      SNTG1        CCS       MYOT      CXXC5       DOK3
-17     CCSER1      WDR86     GALNT3     FAHD2B      HARS2
-18       TCF4        REN     ACVR1C      FGF22       POLQ
-19      NEGR1     TRIM73       TPBG        CCS       NPFF
-Oligodendrocyte
-   Metagene 1 Metagene 2 Metagene 3 Metagene 4 Metagene 5
-0       ERBIN    PPP2R2B  C14orf132      GRIA4     COL5A2
-1       PEX5L      NCAM2    FAM186A      PGBD5      SIDT1
-2     SLC44A1      EDIL3      AP3B2     SLC6A9      STAT4
-3       ELMO1     MAN2A1      TRPV5       P3H2     TESPA1
-4      NCKAP5    SLC44A1     IZUMO4     BAHCC1       MLIP
-5       NCAM2     SPOCK3      SCYL1    RAPGEF3     MICAL2
-6       EDIL3       WWOX      USH1C     ZFYVE9       CRYM
-7      SPOCK3      GRIA4       GNAZ    SHROOM1       FHL1
-8        QDPR      ELMO1      CLVS1      SH2D6    TSPAN13
-9      MAN2A1      PEX5L      ACAP1      HHATL       ZBBX
-10      CDH20     NCKAP5       LDB3    RAPGEF1      VWA3A
-11    CNTNAP2    CNTNAP2      FOXP4      GDPD1      LAMB1
-12     MAP4K5       LDB3      TTLL3      CES4A       STRC
-13    SLC38A2      CDH20       PTK6      FANCB     CAMK2A
-14    PPP2R2B      CADM1      BLCAP     POU3F2       IRS1
-15     PIEZO2      ERBIN        MVP      SCYL1      CRHR1
-16       ANLN      CLCA4    COLEC12       GNAZ     CYP2E1
-17     ZSWIM6      FKBP5      CES4A      CLCA4       FZD1
-18       WWOX      LRRC1     IFNGR2      RESF1     OGFRL1
-19     GPRC5B     ZNF652     COL9A3      KLHL8       SDC2
-Astrocyte
-   Metagene 1 Metagene 2 Metagene 3
-0        RORA      RPL34      LRRC7
-1        NEBL      RPS12       CD38
-2     RANBP3L       TLE5      RPS12
-3        NFIB     RPL35A      RPL15
-4       SASH1      RPL15      SSBP3
-5       DPP10       RPSA  MAP1LC3B2
-6      SAMD4A       RPS7       TLE5
-7         LPP      RPL35      RPL34
-8    SLC39A11    ATP5IF1      RPL35
-9       DOCK7       RPL6       RPSA
-10      ARAP2      SSBP3     RPL35A
-11     PDZRN3     NDUFA4       RPL6
-12      SYNE1       BEX3     ZNF441
-13     AHCYL1       BEX2    SLC28A2
-14      TTC28     TMSB4X       RPS7
-15    SEPTIN7      RPL32      CHMP3
-16     TBC1D5      RPS14     PRSS23
-17       CHD9      RPL26       NOL3
-18       DGKG      CHMP3       CRY2
-19      ASTN2      LZTS3      IFT27
-Microglia-PVM
-   Metagene 1 Metagene 2 Metagene 3 Metagene 4
-0      ATP8B4       DPYD     S100A4    TMEM14A
-1       PRKCA      FOXP1      ANXA2      CORO6
-2        TLN2     ATP8B4     IL27RA     RNF187
-3       MKNK1       SNCA   ARHGAP10      RPH3A
-4         ADK      PRKCA        FGR     KCNMB2
-5      FRMD4B      ALCAM      P2RY8       PTMS
-6       FOXP1       DTNA       EYA2    STARD10
-7        DTNA     FRMD4B       FLT1     CHI3L1
-8      RHBDF2      TNPO1     IFNLR1      LRFN4
-9     NCKAP1L        ADK      PTPRG       NPM3
-10     GPCPD1       CD81    SLC43A3     FAM89B
-11      SPIN1     RHBDF2      KCNN4     LGALS1
-12   PPP1R12A   PPP1R12A     ADARB1       ELK1
-13       SNCA       CTSD     CLEC5A     LRRC39
-14    ZNF518A       TLN2     ACOT11  TNFAIP8L3
-15     MCF2L2    NCKAP1L      SYNE3     PDE10A
-16     YTHDC2        CPM      APOBR      GRWD1
-17      WDPCP      TFCP2     CALHM2       RIC3
-18     PARD3B        GSN        ZYX  TNFRSF11B
-19      TFCP2    ZNF518A        VIM    PSTPIP1
-OPC
-   Metagene 1 Metagene 2
-0       PCDH9      VSNL1
-1      ADGRB3    COX7A2L
-2       KCND2    CDK2AP1
-3        VCAN      PAPPA
-4       LRRC7    SLC16A9
-5         DMD      CORO6
-6     GALNT13      STAT4
-7      BRINP3     CHCHD7
-8       PCDH7       ODC1
-9       EDIL3     VPS33B
-10    KHDRBS3  C20orf203
-11      GPM6B      KLKB1
-12     SLAIN1       TUT1
-13        FER    ZC2HC1B
-14      TAFA1     ZNF433
-15     TBC1D5       ARSG
-16      ARAP2      CRTAP
-17      GDAP1    CWF19L1
-18      FLRT2       CDK7
-19    SEPTIN7      KCNB2
-Endothelial
-   Metagene 1
-0     GALNT18
-1       WWTR1
-2       DUSP1
-3       USP34
-4     SLC38A2
-5       GPM6A
-6       STAU2
-7       SDCBP
-8      NFKBIA
-9        RHOJ
-10      RBM17
-11     LRRC32
-12      PINK1
-13      CIRBP
-14      ACER3
-15      SMIM3
-16     CTDSP1
-17    CDK2AP1
-18      CABP1
-19      SORL1
->>> 
-'''
-
-
-
-
-
-
-
-
 
 for study_name in study_names:
     for cell_type in broad_cell_types:

@@ -497,13 +497,25 @@ def index_to_rvector(index):
     rvector = Vector(index)
     return rvector
 
+# def series_to_rvector(series, convert_index=True):
+#     assert isinstance(series, pd.Series)
+#     Vector = get_rpy2_vector_class(series)
+#     rvector = Vector(series)
+#     if convert_index:
+#         from rpy2.robjects import StrVector
+#         rvector.names = StrVector(astype_str(series.index))  # coerce to string
+#     return rvector
+
 def series_to_rvector(series, convert_index=True):
     assert isinstance(series, pd.Series)
+    # Check for pandas nullable integer type 
+    if pd.api.types.is_integer_dtype(series) and series.isnull().any():
+        series = series.astype('float')
     Vector = get_rpy2_vector_class(series)
     rvector = Vector(series)
     if convert_index:
         from rpy2.robjects import StrVector
-        rvector.names = StrVector(astype_str(series.index))  # coerce to string
+        rvector.names = StrVector(series.index.astype(str))  # coerce to string
     return rvector
 
 def rvector_to_array(rvector):
@@ -542,14 +554,26 @@ def rvector_to_index(rvector):
     index = pd.Index(rvector_to_series(rvector))
     return index
 
+# def df_to_rdf(df, convert_index=True):
+#     assert isinstance(df, pd.DataFrame)
+#     from rpy2.robjects import DataFrame
+#     rdf = DataFrame({col: series_to_rvector(series, convert_index=False)
+#                      for col, series in df.items()})
+#     if convert_index:
+#         from rpy2.robjects import StrVector
+#         rdf.rownames = StrVector(astype_str(df.index))  # coerce to string
+#     return rdf
+
 def df_to_rdf(df, convert_index=True):
     assert isinstance(df, pd.DataFrame)
     from rpy2.robjects import DataFrame
-    rdf = DataFrame({col: series_to_rvector(series, convert_index=False)
+    if isinstance(df.index, pd.MultiIndex) and convert_index:
+        df = df.reset_index()
+    rdf = DataFrame({col: series_to_rvector(series, convert_index=False) 
                      for col, series in df.items()})
-    if convert_index:
+    if convert_index and not isinstance(df.index, pd.MultiIndex):
         from rpy2.robjects import StrVector
-        rdf.rownames = StrVector(astype_str(df.index))  # coerce to string
+        rdf.rownames = StrVector(df.index.astype(str))  # set row names
     return rdf
 
 def rdf_to_df(rdf):
@@ -1555,24 +1579,45 @@ def inverse_normal_transform(series, c=3/8):
     transformed_rank = (rank - c) / (rank.notna().sum() - 2 * c + 1)
     return pd.Series(norm.ppf(transformed_rank), index=series.index)
 
+# class Timer(object):
+#     # See preshing.com/20110924/timing-your-code-using-pythons-with-statement
+#     def __init__(self, name=None):
+#         if name is not None:
+#             print(f'{name}...')
+#         self.name = name
+#     def __enter__(self):
+#         from timeit import default_timer
+#         self.start = default_timer()
+#         return self
+#     def __exit__(self, exception_type, value, traceback):
+#         from timeit import default_timer
+#         time_difference = default_timer() - self.start
+#         hours, remainder = divmod(time_difference, 3600)
+#         minutes, seconds = divmod(remainder, 60)
+#         print(f'{self.name if self.name is not None else "Command"} '
+#               f'{"took" if exception_type is None else "aborted after"} '
+#               f'{int(hours):02}:{int(minutes):02}:{int(seconds):02}')
+
 class Timer(object):
-    # See preshing.com/20110924/timing-your-code-using-pythons-with-statement
     def __init__(self, name=None):
         if name is not None:
             print(f'{name}...')
         self.name = name
+
     def __enter__(self):
         from timeit import default_timer
         self.start = default_timer()
         return self
+
     def __exit__(self, exception_type, value, traceback):
         from timeit import default_timer
         time_difference = default_timer() - self.start
         hours, remainder = divmod(time_difference, 3600)
         minutes, seconds = divmod(remainder, 60)
+        milliseconds = int((seconds - int(seconds)) * 1000)
         print(f'{self.name if self.name is not None else "Command"} '
               f'{"took" if exception_type is None else "aborted after"} '
-              f'{int(hours):02}:{int(minutes):02}:{int(seconds):02}')
+              f'{int(hours):02}:{int(minutes):02}:{int(seconds):02}.{milliseconds:03}')
 
 @contextmanager
 def cd(path):

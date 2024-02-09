@@ -1,6 +1,6 @@
 import anndata as ad, numpy as np, pandas as pd, scanpy as sc, sys, os, gc, warnings
 sys.path.append(os.path.expanduser('~wainberg'))
-from utils import Timer, get_pseudobulk
+from projects.reverse_signatures.old.utils import Timer, get_pseudobulk
 warnings.filterwarnings("ignore", category=FutureWarning)
 pd.set_option('display.max_rows', 50)
 pd.set_option('display.max_columns', 50)
@@ -130,8 +130,25 @@ if not os.path.exists(f'pseudobulk/SEAAD-{region}-broad.h5ad'):
 # Documentation and data: https://www.synapse.org/#!Synapse:syn23650894
 ################################################################################
 
+scdata = data[data.obs['cell_type'] == 'Sst Chodl'].copy()
+scdata.X.getnnz(axis=1)
+sc.pp.filter_cells(scdata, min_genes=5000, inplace=False)[1]
+scdata
+
+tmp = data
+# cells with at least 200 genes 
+# 0.05 MT pct
+
 with Timer('[p400] Loading AD data'):
     data = sc.read('single-cell/p400/p400_qced_shareable.h5ad')
+    with Timer(f'Filtering to cells with >= 200 genes'):
+        #sc.pp.filter_cells(data, min_genes=200)
+        data = data[data.X.getnnz(axis=1) >= 200].copy()
+    with Timer(f'Filtering to cells <5% mitochondrial reads'):
+        mitochondrial_genes = data.var.index.str.startswith('MT-')
+        percent_mito = data[:, mitochondrial_genes].X.sum(axis=1).A1 / \
+                        data.X.sum(axis=1).A1
+        data= data[percent_mito < 0.05]
     cell_type_labels = pd.concat([pd.read_table('single-cell/p400/Glut_cell_type_labels.tsv', index_col=0),
                                   pd.read_table('single-cell/p400/GABA_cell_type_labels.tsv', index_col=0)], axis=0)\
                                       .query('study_name == "p400"')
@@ -254,7 +271,7 @@ if os.path.exists(SCZ_data_file):
 else:
     print('Preprocessing SCZ data')
     from rpy2.robjects import r
-    from utils import r2py
+    from projects.reverse_signatures.old.utils import r2py
     SCZ_data = sc.read('SZBDMulticohort/combinedCells_ACTIONet.h5ad')
     # Convert counts to int32, but make sure all entries were integers first
     counts = SCZ_data.layers['counts']

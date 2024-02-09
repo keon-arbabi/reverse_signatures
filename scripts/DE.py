@@ -3,7 +3,7 @@ from functools import reduce
 from rpy2.robjects import Formula, r
 from scipy.stats import combine_pvalues
 sys.path.append('projects/reverse_signatures/scripts')
-from utils import series_to_rvector, df_to_rdf, df_to_rmatrix,\
+from projects.reverse_signatures.old.utils import series_to_rvector, df_to_rdf, df_to_rmatrix, array_to_rvector, \
     rmatrix_to_df, rdf_to_df, bonferroni, fdr, percentile_transform, Timer
     
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -12,35 +12,47 @@ os.chdir('/home/s/shreejoy/karbabi/projects/reverse_signatures/')
 
 r.library('edgeR', quietly=True)
 r.library('disgenet2r', quietly=True)
-r.source('scripts/voomByGroup.R')
+r.source('scripts/R_functions.R')
 
 ################################################################################
 # Load pseudobulks
 ################################################################################
 
-pseudobulk_files = {'SEAAD-MTG': 'data/pseudobulk/SEAAD-MTG-broad.h5ad',
-                    'SEAAD-DLPFC': 'data/pseudobulk/SEAAD-DLPFC-broad.h5ad',
-                    'p400': 'data/pseudobulk/p400-broad.h5ad'}
+# 'SEAAD-MTG': 'data/pseudobulk/SEAAD-MTG-broad.h5ad',
+# 'SEAAD-DLPFC': 'data/pseudobulk/SEAAD-DLPFC-broad.h5ad',
+pseudobulk_files = {'p400': 'data/pseudobulk/p400-broad.h5ad'}
 pseudobulks = {trait: sc.read(pseudobulk_file)
                for trait, pseudobulk_file in pseudobulk_files.items()}
+
+pseudobulk = sc.read('data/pseudobulk/p400-broad.h5ad')
+ids = pd.read_csv('tmp.csv')['ID']
+
+pseudobulk = pseudobulk[pseudobulk.obs['broad_cell_type'] == "Astrocyte"].copy()
+pseudobulk = pseudobulk[pseudobulk.obs['projid'].isin(ids).astype(bool)].copy()
+pseudobulk.X.shape
+pseudobulk.X[(pseudobulk.obs['projid'] == 10514454).astype(bool), pseudobulk.var.index == 'ABCA7']
+
 
 # Note: num_cells is the number of cells for that broad_cell_type per subject 
 for trait, pseudobulk in pseudobulks.items():
     library_sizes = pseudobulk.X.sum(axis=1)
     assert not np.any(library_sizes == 0), f'{trait} has libraries with no counts'
     pseudobulk.obs['library_size'] = library_sizes
-    pseudobulk.obs['log_library_size'] = np.log2(pseudobulk.obs['library_size'])    
+    pseudobulk.obs['log_library_size'] = np.log2(pseudobulk.obs['library_size'])
     pseudobulk.obs['log_num_cells'] = np.log2(pseudobulk.obs['num_cells'] + 1)
 
 for trait, pseudobulk in pseudobulks.items():
     if 'SEAAD' in trait:
         pseudobulk.obs['Dx'] = \
-            np.where(pseudobulk.obs['Consensus Clinical Dx (choice=Alzheimers disease)'].eq('Checked'), 1,
-            np.where(pseudobulk.obs['Consensus Clinical Dx (choice=Control)'].eq('Checked'), 0, np.nan)).astype(float)
-        pseudobulk = pseudobulk[pseudobulk.obs['Dx'].notna() & (pseudobulk.obs['ACT'] | pseudobulk.obs['ADRC Clinical Core'])]
+            np.where(pseudobulk.obs['Consensus Clinical Dx (choice=Alzheimers disease)']
+                     .eq('Checked'), 1,
+            np.where( pseudobulk.obs['Consensus Clinical Dx (choice=Control)']
+                     .eq('Checked'), 0, np.nan)).astype(float)
+        pseudobulk = pseudobulk[pseudobulk.obs['Dx'].notna() & \
+            (pseudobulk.obs['ACT'] | pseudobulk.obs['ADRC Clinical Core'])]
         pseudobulks[trait] = pseudobulk
     if trait == 'p400':
-        pseudobulk.obs['Dx'] = pseudobulk.obs['pmAD'].astype(float)
+        pseudobulk.obs['Dx'] = pseudobulk.obs['pmAD'].fillna(0).astype(float)
         pseudobulk.obs['apoe4'] = pseudobulk.obs['apoe_genotype'].astype(str).str.count('4')
         pseudobulk.obs['pmi'] = pseudobulk.obs['pmi'].fillna(pseudobulk.obs['pmi'].median())
         pseudobulk = pseudobulk[pseudobulk.obs['Dx'].notna()]
@@ -118,9 +130,9 @@ sufficiently_expressed_genes = {
     cell_type: reduce(pd.Index.intersection, (
         (dataset := cell_type_pseudobulks[trait, cell_type]).var.index[
             np.percentile(dataset.X[np.logical_or(
-                (dataset.obs[phenotype_column[trait]] == \
+                (dataset.obs[phenotype_column[trait]] ==
                     control_name[trait]).to_numpy(dtype=bool),
-                (dataset.obs[phenotype_column[trait]] != \
+                (dataset.obs[phenotype_column[trait]] !=
                     control_name[trait]).to_numpy(dtype=bool))], 20, axis=0) >= 1]
         for trait in pseudobulks)) for cell_type in broad_cell_types}
 
@@ -170,7 +182,7 @@ for (trait, cell_type), dataset in filtered_pseudobulks.items():
 
 ################################################################################
 # Differential expression with limma-voom
-# - voomByGroup: z
+# - voomByGroup: https://github.com/YOU-k/voomByGroup 
 ################################################################################
 
 def aggregate(DEs):
@@ -237,33 +249,85 @@ for trait, cell_type in normalized_count_matrices:
         log_CPMs[trait, cell_type] = rmatrix_to_df(voom_output.rx2('E')).copy()
         lmFit_output = r.lmFit(voom_output, design_matrix)
         eBayes_output = r.eBayes(lmFit_output)
-        res = r.topTable(eBayes_output, coef='diagnosisCase', number=np.inf,
-                         adjust_method='none', sort_by='p', confint=True)
+        SE = np.array(eBayes_output.rx2('stdev.unscaled').rx(True, 'diagnosisCase')) * \
+            np.array(r.sqrt(eBayes_output.rx2('s2.post')))
+        res = r.topTable(eBayes_output, coef='diagnosisCase', number=np.inf, confint=True)
+        res_df = rdf_to_df(res)
         DE_limma_vooms[trait, cell_type] = rdf_to_df(res)\
+            .assign(lfcse=SE)\
             .rename_axis('gene')\
-            [['AveExpr', 'logFC', 'CI.L', 'CI.R', 'P.Value']]\
+            [['AveExpr', 'logFC', 'CI.L', 'CI.R', 'P.Value', 'lfcse']]\
             .rename(columns={'P.Value': 'p'})
             
-# save results
 DE_limma_voom = aggregate(DE_limma_vooms)
-#DE_limma_voom.to_csv('results/voom/limma_voom.tsv.gz', sep='\t', compression='gzip')
+# DE_limma_voom.to_csv('results/voom/limma_voom.tsv.gz', sep='\t', compression='gzip')
 
-# TODO: weighted, ask Tain which weights
+# https://github.com/unistbig/metapro/blob/master/R/metapro.R
+
+def wFisher(p, weight=None, is_onetail=True, eff_sign=None):
+    from scipy.stats import gamma
+    p = np.array(p)
+    weight = np.ones(len(p)) if weight is None else np.array(weight)
+    mask = ~np.isnan(p)
+    p, weight = p[mask], weight[mask]
+    
+    if not is_onetail:
+        eff_sign = np.array(eff_sign)[mask]
+    if len(p) != len(weight):
+        raise ValueError("Length mismatch between 'p' and 'weight'")
+    
+    N, ratio = len(p), weight / weight.sum()
+    Gsum = lambda p_values: np.sum(gamma.ppf(p_values, a=N * ratio, scale=2))
+    
+    if is_onetail:
+        resultP = gamma.sf(Gsum(p), a=N, scale=2)
+        return pd.Series({"p_combined": min(1, resultP)})
+    
+    p1, p2 = p.copy(), p.copy()
+    pos, neg = eff_sign > 0, eff_sign < 0
+    p1[pos], p1[neg] = p[pos] / 2, 1 - p[neg] / 2
+    p2[pos], p2[neg] = 1 - p[pos] / 2, p[neg] / 2
+    resultP1, resultP2 = gamma.sf(Gsum(p1), a=N, scale=2), gamma.sf(Gsum(p2), a=N, scale=2)
+    resultP = 2 * min(resultP1, resultP2)
+    overall_eff_direction = "+" if resultP1 <= resultP2 else "-"
+    
+    return pd.Series({"p_combined": min(1, resultP), "overall_eff_direction": overall_eff_direction})
+
 DE_limma_voom_combined = DE_limma_voom\
-    .groupby(['cell_type', 'gene'])['p']\
-    .apply(lambda df: combine_pvalues(df, method='fisher')[1])\
-    .reset_index(name='p')\
-    .assign(fdr=lambda df: fdr(df['p']))
-DE_limma_voom_combined.to_csv('results/voom/limma_voom_combined.tsv', sep='\t')
+    .groupby(['cell_type', 'gene'])\
+    .apply(lambda df: wFisher(df['p'], 
+                              weight=1 / (df['lfcse'] ** 2),
+                              eff_sign=df['logFC'], is_onetail=False))\
+    .rename(columns={"p_combined": "p"})\
+    .assign(fdr=lambda df: fdr(df['p']))\
+    [['p', 'fdr', 'overall_eff_direction']]
+# DE_limma_voom_combined.to_csv('results/voom/limma_voom_combined.tsv.gz', sep='\t', compression='gzip')
 
-print(DE_limma_voom_combined[DE_limma_voom_combined['fdr'] < 0.01]\
+print(DE_limma_voom_combined.loc[DE_limma_voom_combined['fdr'] < 0.01]
+    .reset_index()
     .groupby('cell_type')['gene'].nunique())
 
 ################################################################################
 
 # load results 
-DE_limma_voom = pd.read_csv('results/voom/limma_voom_logcells.tsv.gz', sep='\t')\
+DE_limma_voom = pd.read_csv('results/voom/limma_voom.tsv.gz', sep='\t')\
     .set_index(['trait', 'cell_type', 'gene'])  
+
+print_num_hits(DE_limma_voom)    
+
+'''print_num_hits(DE_limma_voom)
+                SEAAD-DLPFC SEAAD-MTG p400
+Astrocyte                 2       191  323
+Endothelial               2         0    6
+Excitatory                0        31  799
+Inhibitory                0         0  274
+Microglia-PVM             0         0   11
+OPC                       1         0    4
+Oligodendrocyte           7        54  138
+'''
+
+DE_limma_voom_combined = pd.read_csv('results/voom/limma_voom_combined.tsv.gz', sep='\t')\
+    .set_index(['cell_type', 'gene'])  
 
 DE_tain = pd.read_csv('data/differential-expression/de_aspan_voombygroup_p400.tsv', sep='\t')\
     .rename(columns={'study': 'trait', 'gene_id': 'gene', 'log_fc': 'logFC', 'p_value': 'p'})\
@@ -280,25 +344,6 @@ DE_tain = pd.read_csv('data/differential-expression/de_aspan_voombygroup_p400.ts
             
 print_num_hits(DE_tain, method='fdr', threshold=0.05)
 print_num_hits(DE_limma_voom, method='fdr', threshold=0.05)
-
-'''             p400
-Astrocyte        156
-Endothelial        0
-Excitatory       610
-Inhibitory       352
-Microglia-PVM      1
-OPC                2
-Oligodendrocyte   44
-
-                p400
-Astrocyte        338
-Endothelial        6
-Excitatory       860
-Inhibitory       335
-Microglia-PVM     11
-OPC                3
-Oligodendrocyte  133
-'''
 
 n_DE_limma = DE_limma_voom.query('fdr < 0.05 & trait == "p400"').groupby('cell_type').size()
 n_DE_tain = DE_tain.query('fdr < 0.05').groupby('cell_type').size()
